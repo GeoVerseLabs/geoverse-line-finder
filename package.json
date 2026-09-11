@@ -1,0 +1,79 @@
+{
+  "name": "geoverse-line-finder",
+  "version": "0.1.0",
+  "description": "Weight-aware shortest paths on GeoJSON LineString networks: pluggable A*/Dijkstra engines, connectivity-aware snapping and multi-waypoint routes.",
+  "type": "module",
+  "license": "MIT",
+  "author": "DIY Liu",
+  "keywords": [
+    "geojson",
+    "linestring",
+    "routing",
+    "pathfinding",
+    "shortest-path",
+    "astar",
+    "dijkstra",
+    "network",
+    "gis"
+  ],
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/geoverse-line-finder.global.js",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "pnpm@10.11.0",
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.lib.json && tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "bench": "tsx bench/run.ts",
+    "bench:gpf": "tsx bench/gpf-root-cause.ts",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^22.10.0",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^9.39.4",
+    "geojson-path-finder": "2.1.0",
+    "prettier": "^3.8.4",
+    "terra-route": "0.0.18",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.61.0",
+    "vitest": "^4.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

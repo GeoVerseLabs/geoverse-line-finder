@@ -1,0 +1,8 @@
+{
+  "//": "Library-only check: no Node or DOM typings, so src/ cannot silently depend on a host runtime.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": []
+  },
+  "include": ["src"]
+}
