@@ -4,7 +4,7 @@
 
 This project follows [Semantic Versioning](https://semver.org/); while in 0.x, minor versions may contain breaking changes.
 
-## 0.1.0 — Unreleased
+## 0.1.0 — 2026-09-11
 
 First release, open-sourced under the Apache License 2.0.
 
