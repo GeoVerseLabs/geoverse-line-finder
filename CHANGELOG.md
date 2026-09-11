@@ -1,10 +1,12 @@
 # Changelog
 
+🌐 简体中文 ｜ [English](CHANGELOG.en.md)
+
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)；0.x 期间，次版本号可能包含不兼容变更。
 
 ## 0.1.0 — 未发布
 
-首个版本。
+首个版本，以 Apache-2.0 协议开源。
 
 ### 新增
 
@@ -17,3 +19,4 @@
 - 吸附：`edge` / `vertex` / `node` / `exact` 四种模式、`maxDistance`、连通性感知分配；单独的 `nearest()`。
 - 结果：`legs`、按来源要素聚合的 `sections`、`waypoints`、判别联合的失败原因、`toLineString()`。
 - 产物：ESM、CommonJS、类型声明，以及 IIFE（全局 `GeoVerseLineFinder`）。
+- 工程：GitHub Actions 的 CI（Node 20 / 22 全部门禁，Node 18 / 20 / 22 产物冒烟）与打 tag 发布（npm provenance）；中英文文档，中文为主。

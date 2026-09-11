@@ -1,5 +1,11 @@
 # geoverse-line-finder
 
+🌐 简体中文 ｜ [English](README.en.md)
+
+[![CI](https://github.com/GeoVerseLabs/geoverse-line-finder/actions/workflows/ci.yml/badge.svg)](https://github.com/GeoVerseLabs/geoverse-line-finder/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/geoverse-line-finder)](https://www.npmjs.com/package/geoverse-line-finder)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 在 GeoJSON 线网络（`LineString` / `MultiLineString`）上求最短路径的零依赖 TypeScript 库：
 
 - **可配置权重**：与 geojson-path-finder 完全兼容的权重函数（双向同价 / `{ forward, backward }` 分方向 / 假值不可通行），外加长度上下文与声明式预设；
@@ -148,15 +154,16 @@ interface RouteSuccess {
 
 - 全部结构为扁平 TypedArray；查询复用 scratch 缓冲，只触碰访问到的节点。
 - 测试含与朴素参考实现的随机差分、GPF 自带测试的全部断言，以及在 GPF 的 13.5 万坐标 OSM 单向路网上与独立裁判逐对比对。
+- CI（GitHub Actions）在 Node 20 / 22 上跑全部门禁，并在 Node 18 / 20 / 22 上直接加载构建产物；推送 `vX.Y.Z` tag 自动发布到 npm，见 [docs/RELEASE.md](docs/RELEASE.md)。
 - 实测数据与复现方法见 [docs/BENCHMARK.md](docs/BENCHMARK.md)；设计说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ```bash
 pnpm test        # 单元 + 差分 + 对齐测试
 pnpm bench       # 三库基准（geojson-path-finder 测试数据，≥3 轮）
 pnpm bench:gpf   # geojson-path-finder 次优路线的根因实验
-pnpm check       # typecheck + lint + test + build
+pnpm check       # 类型检查 + lint + 格式 + 测试（覆盖率棘轮）+ 构建 + 产物冒烟
 ```
 
 ## 许可
 
-MIT。借用的代码与思路见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+[Apache-2.0](LICENSE)，版权与归属说明见 [NOTICE](NOTICE)。借用的代码与思路（MIT / ISC）见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

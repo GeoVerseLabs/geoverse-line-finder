@@ -1,5 +1,7 @@
 # 基准与正确性实测
 
+🌐 简体中文 ｜ [English](BENCHMARK.en.md)
+
 > 2026-09-11 · Intel Core Ultra 9 185H · Node v22.12.0 · `NODE_OPTIONS=--expose-gc` · 每个场景 5 轮 + 1 热身，每轮从零构建并轮换执行顺序 · 数据为 geojson-path-finder 自带的测试路网。
 > 表中为**中位数 [最小–最大]**；两组区间重叠的差异视为噪声，不下结论。复现：`pnpm bench`（`--only osm` 可单跑一个场景）。
 
