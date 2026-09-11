@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "DIY Liu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GeoVerseLabs/geoverse-line-finder.git"
+  },
+  "homepage": "https://github.com/GeoVerseLabs/geoverse-line-finder#readme",
+  "bugs": {
+    "url": "https://github.com/GeoVerseLabs/geoverse-line-finder/issues"
+  },
   "keywords": [
     "geojson",
     "linestring",
@@ -20,6 +28,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
@@ -27,6 +36,7 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "unpkg": "./dist/geoverse-line-finder.global.js",
+  "jsdelivr": "./dist/geoverse-line-finder.global.js",
   "exports": {
     ".": {
       "import": {
@@ -43,6 +53,10 @@
   "engines": {
     "node": ">=18"
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "packageManager": "pnpm@10.11.0",
   "scripts": {
     "build": "tsup",
@@ -55,15 +69,19 @@
     "test:coverage": "vitest run --coverage",
     "bench": "tsx bench/run.ts",
     "bench:gpf": "tsx bench/gpf-root-cause.ts",
-    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build",
+    "check:package": "publint && attw --pack .",
+    "prepublishOnly": "pnpm check && pnpm check:package"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.3",
     "@eslint/js": "^9.39.4",
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^4.1.8",
     "eslint": "^9.39.4",
     "geojson-path-finder": "2.1.0",
     "prettier": "^3.8.4",
+    "publint": "^0.3.21",
     "terra-route": "0.0.18",
     "tsup": "^8.5.0",
     "tsx": "^4.20.0",
