@@ -1,0 +1,92 @@
+name: Release
+
+# Publishing happens only for a pushed tag vX.Y.Z that matches package.json.
+# Running the workflow by hand performs every check plus `npm publish --dry-run` and publishes nothing.
+#
+# One-time setup (see docs/RELEASE.md): a public repository (npm provenance requires it) and a repository
+# secret NPM_TOKEN holding an npm granular access token with publish rights for this package.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Created automatically on first use; add required reviewers in Settings → Environments to gate releases.
+    environment: npm
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # npm provenance
+    env:
+      DRY_RUN: ${{ github.event_name != 'push' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+
+      - name: Resolve version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Tag must match package.json
+        if: github.event_name == 'push'
+        run: |
+          if [ "$GITHUB_REF_NAME" != "v${{ steps.version.outputs.version }}" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Both changelogs must describe this version
+        run: |
+          v='${{ steps.version.outputs.version }}'
+          for f in CHANGELOG.md CHANGELOG.en.md; do
+            heading="$(grep -E "^## ${v//./\\.}( |$)" "$f" || true)"
+            if [ -z "$heading" ]; then
+              echo "::error file=$f::no '## $v' section"
+              exit 1
+            fi
+            if [ "$DRY_RUN" != "true" ] && echo "$heading" | grep -qE '未发布|Unreleased'; then
+              echo "::error file=$f::'## $v' is still marked as unreleased"
+              exit 1
+            fi
+          done
+
+      - name: Check (typecheck · lint · format · tests · build · dist smoke test)
+        run: pnpm check
+
+      - name: Package lint (publint + attw)
+        run: pnpm check:package
+
+      # The two steps above are exactly what `prepublishOnly` runs, so lifecycle scripts are skipped here.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            npm publish --dry-run --ignore-scripts
+          else
+            npm publish --provenance --access public --ignore-scripts
+          fi
+
+      - name: GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v='${{ steps.version.outputs.version }}'
+          section() { awk -v h="## $v" 'index($0, h) == 1 { on = 1; next } /^## / { on = 0 } on' "$1"; }
+          { section CHANGELOG.md; printf '\n---\n\n'; section CHANGELOG.en.md; } > release-notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag

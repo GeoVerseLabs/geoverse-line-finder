@@ -68,9 +68,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "smoke": "node scripts/smoke-dist.mjs",
     "bench": "tsx bench/run.ts",
     "bench:gpf": "tsx bench/gpf-root-cause.ts",
-    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build",
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build && pnpm smoke",
     "check:package": "publint && attw --pack .",
     "prepublishOnly": "pnpm check && pnpm check:package"
   },

@@ -1,0 +1,2 @@
+# Keep LF everywhere so prettier's format check behaves the same on Windows and in CI.
+* text=auto eol=lf

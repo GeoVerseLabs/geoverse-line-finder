@@ -13,6 +13,13 @@ export default defineConfig(
     },
   },
   {
+    // Plain Node scripts that run without a build step (e.g. the dist smoke test on Node 18 in CI).
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { console: 'readonly', process: 'readonly', URL: 'readonly' },
+    },
+  },
+  {
     // The library must stay runtime-agnostic (browser, worker, Node).
     files: ['src/**/*.ts'],
     rules: {
