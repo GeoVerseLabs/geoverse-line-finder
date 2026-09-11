@@ -15,6 +15,15 @@
 pnpm add geoverse-line-finder
 ```
 
+同时提供 ESM 与 CommonJS（Node ≥ 18）。不经打包器时可直接用 `<script>` 引入，全局变量为 `GeoVerseLineFinder`：
+
+```html
+<script src="https://unpkg.com/geoverse-line-finder@0.1.0"></script>
+<script>
+  const finder = new GeoVerseLineFinder.LineFinder(roads);
+</script>
+```
+
 ## 快速开始
 
 ```ts
