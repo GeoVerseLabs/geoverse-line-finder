@@ -1,0 +1,8 @@
+geoverse-line-finder
+Copyright 2026 DIY Liu
+
+Licensed under the Apache License, Version 2.0; see the LICENSE file.
+
+This product includes code adapted from third-party projects distributed under
+the MIT and ISC licenses (terra-route, geojson-path-finder, cheap-ruler and
+flatbush). Their attributions and license texts are in THIRD_PARTY_NOTICES.md.

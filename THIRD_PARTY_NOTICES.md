@@ -1,8 +1,8 @@
 # Third-party notices
 
-geoverse-line-finder is an independent implementation. It adapts ideas and, where
-noted, small pieces of code from the projects below. Their licenses are reproduced
-as required.
+geoverse-line-finder is an independent implementation licensed under the Apache License 2.0
+(see `LICENSE` and `NOTICE`). It adapts ideas and, where noted, small pieces of code from the
+projects below; their licenses are reproduced as required and continue to apply to those portions.
 
 | Project                                                                                | License | What was adapted                                                                                                                                             |
 | -------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |

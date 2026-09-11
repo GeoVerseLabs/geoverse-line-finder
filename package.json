@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Weight-aware shortest paths on GeoJSON LineString networks: pluggable A*/Dijkstra engines, connectivity-aware snapping and multi-waypoint routes.",
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "DIY Liu",
   "repository": {
     "type": "git",
@@ -30,6 +30,7 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
+    "NOTICE",
     "THIRD_PARTY_NOTICES.md"
   ],
   "main": "./dist/index.cjs",
