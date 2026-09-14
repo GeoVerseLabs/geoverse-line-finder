@@ -21,7 +21,7 @@ export class PackedRTree {
   private readonly queue = new FourAryHeap();
   private readonly stack: number[] = [];
 
-  constructor(numItems: number, nodeSize = 16) {
+  constructor(numItems: number, nodeSize = 16, data?: { boxes: Float64Array; indices: Uint32Array }) {
     this.numItems = Math.max(0, numItems | 0);
     this.nodeSize = Math.min(Math.max(nodeSize | 0, 2), 65535);
     let n = this.numItems;
@@ -34,8 +34,32 @@ export class PackedRTree {
         this.levelBounds.push(numNodes * 4);
       } while (n !== 1);
     }
-    this.boxes = new Float64Array(numNodes * 4);
-    this.indices = new Uint32Array(numNodes);
+    if (data) {
+      if (data.boxes.length !== numNodes * 4 || data.indices.length !== numNodes) {
+        throw new RangeError('R-tree data does not match its item count and node size.');
+      }
+      this.boxes = data.boxes;
+      this.indices = data.indices;
+      this.pos = numNodes * 4;
+    } else {
+      this.boxes = new Float64Array(numNodes * 4);
+      this.indices = new Uint32Array(numNodes);
+    }
+  }
+
+  /** A finished tree over previously built arrays (see {@link data}); the arrays are used, not copied. */
+  static fromData(
+    numItems: number,
+    nodeSize: number,
+    boxes: Float64Array,
+    indices: Uint32Array,
+  ): PackedRTree {
+    return new PackedRTree(numItems, nodeSize, { boxes, indices });
+  }
+
+  /** The tree's backing arrays, for serialisation. */
+  data(): { boxes: Float64Array; indices: Uint32Array } {
+    return { boxes: this.boxes, indices: this.indices };
   }
 
   add(minX: number, minY: number, maxX: number, maxY: number): number {

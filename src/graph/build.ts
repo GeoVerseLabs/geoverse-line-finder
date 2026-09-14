@@ -6,10 +6,11 @@ import {
   normalizeWeight,
   type NormalizedWeight,
   type WeightFunction,
+  type ZeroWeight,
 } from '../weight/weight';
 import { buildChains } from './chains';
 import { RoutingGraph, type GraphStats } from './graph';
-import { buildTopology, scanNetwork } from './topology';
+import { buildTopology, scanNetwork, type GroupFunction } from './topology';
 
 export interface GraphOptions<P = unknown> {
   /** Distance measure. Default `'haversine'` (coordinates in degrees, distances in meters). */
@@ -27,6 +28,25 @@ export interface GraphOptions<P = unknown> {
   splitIntersections?: boolean;
   /** Collapse degree-2 vertices into chains (faster search, identical results). Default `true`. */
   compact?: boolean;
+  /**
+   * Connectivity groups for non-planar networks (floors, bridges over roads): vertices, repairs and
+   * snapping never join different groups; connector features (`[startGroup, endGroup]`) link them.
+   */
+  group?: GroupFunction<P>;
+  /** What a weight of `0` means. Default `'impassable'` (geojson-path-finder contract); `'free'` for connectors. */
+  zeroWeight?: ZeroWeight;
+  /** Record repairs and invalid coordinates so that `graph.diagnostics()` can locate them. Default `false`. */
+  diagnostics?: boolean;
+}
+
+/** Build settings kept on the graph (for diagnostics, serialisation and snapping). */
+export interface GraphSettings {
+  readonly tolerance: number;
+  readonly snapDangles: number;
+  readonly splitIntersections: boolean;
+  readonly compact: boolean;
+  readonly zeroWeight: ZeroWeight;
+  readonly maxAbsLat: number;
 }
 
 function nonNegative(value: number | undefined, name: string): number {
@@ -47,13 +67,34 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   }
   const tolerance = nonNegative(options.tolerance, 'tolerance');
   const snapDangles = nonNegative(options.snapDangles, 'snapDangles');
+  const zeroWeight = options.zeroWeight ?? 'impassable';
+  if (zeroWeight !== 'impassable' && zeroWeight !== 'free') {
+    throw new RangeError(`Option "zeroWeight" must be "impassable" or "free", got ${String(zeroWeight)}.`);
+  }
+  if (options.group !== undefined && typeof options.group !== 'function') {
+    throw new TypeError('Option "group" must be a function.');
+  }
   const scan = scanNetwork(network);
-  const metric = resolveMetric(options.metric, scan.coordinates > 0 ? (scan.minY + scan.maxY) / 2 : 0);
+  const referenceLat = scan.coordinates > 0 ? (scan.minY + scan.maxY) / 2 : 0;
+  const metric = resolveMetric(options.metric, referenceLat);
+  if (
+    metric.geographic &&
+    scan.coordinates > 0 &&
+    (scan.minX < -180 || scan.maxX > 180 || scan.minY < -90 || scan.maxY > 90)
+  ) {
+    throw new RangeError(
+      `Coordinates span [${scan.minX}, ${scan.maxX}] × [${scan.minY}, ${scan.maxY}], outside the ` +
+        `[-180, 180] × [-90, 90] range of the geographic metric "${metric.name}". Projected coordinates ` +
+        'need metric: "euclidean".',
+    );
+  }
   const topo = buildTopology(network, metric, {
     tolerance,
     snapDangles,
     splitIntersections: options.splitIntersections === true,
     maxAbsLat: scan.maxAbsLat,
+    group: options.group as GroupFunction<unknown> | undefined,
+    recordDiagnostics: options.diagnostics === true,
   });
 
   // --- weights -------------------------------------------------------------------------------------
@@ -64,8 +105,16 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   const segLen = new Float64Array(S);
   const alive = new Uint8Array(S);
   const weight = options.weight ?? (distanceWeight as WeightFunction<P>);
+  const zeroIsFree = zeroWeight === 'free';
   const features = network.features;
   const norm: NormalizedWeight = { forward: 0, backward: 0 };
+  // Measures accumulate the segment lengths along each feature part (topology keeps segments in that order),
+  // so they add up exactly to route distances, merges and splits included.
+  const segMeasureA = new Float64Array(S);
+  const segMeasureB = new Float64Array(S);
+  let measure = 0;
+  let measureFeature = -1;
+  let measurePart = -1;
   let impassableSegments = 0;
   let oneWaySegments = 0;
   for (let s = 0; s < S; s++) {
@@ -74,8 +123,16 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
     const featureIndex = topo.segFeature[s];
     const feature = features[featureIndex];
     const distance = metric.distance(pa, pb);
+    if (featureIndex !== measureFeature || topo.segPart[s] !== measurePart) {
+      measure = 0;
+      measureFeature = featureIndex;
+      measurePart = topo.segPart[s];
+    }
+    segMeasureA[s] = measure;
+    measure += distance;
+    segMeasureB[s] = measure;
     const raw = weight(pa, pb, feature.properties as P, { distance, featureIndex, feature });
-    normalizeWeight(raw, norm, `feature #${featureIndex}`);
+    normalizeWeight(raw, norm, `feature #${featureIndex}`, zeroIsFree);
     segFwd[s] = norm.forward;
     segBwd[s] = norm.backward;
     segLen[s] = distance;
@@ -89,7 +146,8 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
 
   // --- chains and nodes ----------------------------------------------------------------------------
   const V = store.size;
-  const built = buildChains(V, topo.segA, topo.segB, alive, options.compact !== false);
+  const compact = options.compact !== false;
+  const built = buildChains(V, topo.segA, topo.segB, alive, compact);
   const vertexNode = new Int32Array(V).fill(-1);
   const nodeVertexList: number[] = [];
   for (let v = 0; v < V; v++) {
@@ -115,6 +173,10 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   const sBwd = new Float64Array(K);
   const sLen = new Float64Array(K);
   const sFeature = new Int32Array(K);
+  const sMeasureStart = new Float64Array(K);
+  const sMeasureEnd = new Float64Array(K);
+  const sPart = new Int32Array(K);
+  const sReversed = new Uint8Array(K);
   const vertexChain = new Int32Array(V).fill(-1);
   const vertexChainPos = new Int32Array(V).fill(-1);
 
@@ -134,6 +196,10 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
       sBwd[k] = b;
       sLen[k] = segLen[s];
       sFeature[k] = topo.segFeature[s];
+      sMeasureStart[k] = rev ? segMeasureB[s] : segMeasureA[s];
+      sMeasureEnd[k] = rev ? segMeasureA[s] : segMeasureB[s];
+      sPart[k] = topo.segPart[s];
+      sReversed[k] = rev;
       fw += f;
       bw += b;
       len += segLen[s];
@@ -228,7 +294,8 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   // --- A* heuristic data ---------------------------------------------------------------------------
   // h(v) = scale · |embed(v) − embed(target)| with scale = min over segments of cost / length is a lower
   // bound on any remaining cost. The tiny deflation absorbs floating point noise and the difference
-  // between linear interpolation and the geodesic on partially traversed segments.
+  // between linear interpolation and the geodesic on partially traversed segments. A free (zero-cost)
+  // segment of positive length makes the scale 0, which disables the heuristic.
   let minRatio = Infinity;
   for (let k = 0; k < K; k++) {
     const len = sLen[k];
@@ -284,10 +351,13 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
     edges: M,
     components: componentCount,
     largestComponentNodes: largest >= 0 ? componentNodes[largest] : 0,
+    groups: topo.groupKeys.length,
   };
 
+  const grouped = topo.groupKeys.length > 1;
   return new RoutingGraph<P>({
     metric,
+    referenceLat,
     features,
     stats,
     vertices: {
@@ -298,6 +368,7 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
       node: vertexNode,
       chain: vertexChain,
       chainPos: vertexChainPos,
+      group: grouped ? Int32Array.from(store.group) : null,
     },
     nodes: { count: N, vertex: nodeVertex, component: nodeComponent, embedding },
     chains: {
@@ -311,12 +382,34 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
       length: chainLen,
       component: chainComponent,
     },
-    segments: { count: K, chain: sChain, forward: sFwd, backward: sBwd, length: sLen, feature: sFeature },
+    segments: {
+      count: K,
+      chain: sChain,
+      forward: sFwd,
+      backward: sBwd,
+      length: sLen,
+      feature: sFeature,
+      measureStart: sMeasureStart,
+      measureEnd: sMeasureEnd,
+      part: sPart,
+      reversed: sReversed,
+    },
     edges: { count: M, offsets, targets, costs, ref },
     components: { count: componentCount, nodes: componentNodes, length: componentLength, largest },
     heuristic: { dims: scale > 0 ? dims : 0, scale },
     segmentIndex,
     store,
     remap: topo.remap,
+    groupKeys: topo.groupKeys,
+    settings: {
+      tolerance,
+      snapDangles,
+      splitIntersections: options.splitIntersections === true,
+      compact,
+      zeroWeight,
+      maxAbsLat: scan.maxAbsLat,
+    },
+    diagnosticsLog:
+      topo.repairs && topo.invalid ? { repairs: topo.repairs, invalid: Int32Array.from(topo.invalid) } : null,
   });
 }

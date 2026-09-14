@@ -1,6 +1,17 @@
 import type { Metric } from '../geo/metric';
 import { PackedRTree } from '../spatial/rtree';
 import type { NetworkFeature, Position } from '../types';
+import type { GraphSettings } from './build';
+import { diagnoseGraph, type DiagnosticsOptions, type GraphDiagnostics } from './diagnostics';
+import { strongComponents, type StrongComponents } from './scc';
+import {
+  graphFromTransferable,
+  graphToTransferable,
+  type DeserializeOptions,
+  type SerializeOptions,
+  type TransferableGraph,
+} from './serialize';
+import type { GroupKey, RepairLog } from './topology';
 import type { VertexStore } from './vertex-store';
 
 export interface GraphStats {
@@ -18,7 +29,7 @@ export interface GraphStats {
   vertices: number;
   /** Input coordinates merged into an existing vertex (exact duplicates or within `tolerance`). */
   mergedVertices: number;
-  /** Dead ends connected by `snapDangles`. */
+  /** Dead ends connected by `snapDangles` (including dead ends that already touched a segment). */
   danglesSnapped: number;
   /** Crossings / touches noded by `splitIntersections`. */
   intersectionsSplit: number;
@@ -37,6 +48,8 @@ export interface GraphStats {
   /** Weakly connected components. */
   components: number;
   largestComponentNodes: number;
+  /** Connectivity groups (1 unless the `group` option is used). */
+  groups: number;
 }
 
 export interface VertexTable {
@@ -51,6 +64,8 @@ export interface VertexTable {
   readonly chain: Int32Array;
   /** Vertex index within its chain (interior vertices only). */
   readonly chainPos: Int32Array;
+  /** Group index per vertex (see {@link RoutingGraph.groupKeys}); `null` when the graph has one group. */
+  readonly group: Int32Array | null;
 }
 
 export interface NodeTable {
@@ -84,6 +99,17 @@ export interface SegmentTable {
   readonly backward: Float64Array;
   readonly length: Float64Array;
   readonly feature: Int32Array;
+  /**
+   * Measure at the segment's start / end in chain direction: metric length along the source feature's part
+   * from its first coordinate, accumulated over the graph's segments (after merging and splitting), so
+   * measures add up exactly to route distances. Gaps left by invalid coordinates add no length.
+   */
+  readonly measureStart: Float64Array;
+  readonly measureEnd: Float64Array;
+  /** Part index within a MultiLineString (0 for LineStrings). */
+  readonly part: Int32Array;
+  /** 1 when the chain runs against the feature's digitised direction on this segment. */
+  readonly reversed: Uint8Array;
 }
 
 /** Compressed sparse row adjacency of the directed search graph. */
@@ -97,6 +123,22 @@ export interface EdgeTable {
   readonly ref: Int32Array;
 }
 
+/** Incoming adjacency: for node `n`, entries `[offsets[n], offsets[n + 1])` are edges ending at `n`. */
+export interface ReverseEdgeTable {
+  readonly offsets: Int32Array;
+  readonly sources: Int32Array;
+  readonly costs: Float64Array;
+  /** Forward edge id of every entry. */
+  readonly edges: Int32Array;
+}
+
+/** Chains touching each node: entries `[offsets[n], offsets[n + 1])`; `atStart` = the chain starts there. */
+export interface NodeChainTable {
+  readonly offsets: Int32Array;
+  readonly chains: Int32Array;
+  readonly atStart: Uint8Array;
+}
+
 export interface ComponentTable {
   readonly count: number;
   readonly nodes: Int32Array;
@@ -106,8 +148,17 @@ export interface ComponentTable {
   readonly largest: number;
 }
 
+/** Recorded by `buildGraph` with `diagnostics: true`. */
+export interface DiagnosticsLog {
+  readonly repairs: RepairLog;
+  /** `(featureIndex, partIndex, coordinateIndex)` triples. */
+  readonly invalid: Int32Array;
+}
+
 export interface RoutingGraphParts<P> {
   metric: Metric;
+  /** Latitude the metric was resolved for (cheap-ruler). */
+  referenceLat: number;
   features: readonly NetworkFeature<P>[];
   stats: GraphStats;
   vertices: VertexTable;
@@ -120,14 +171,20 @@ export interface RoutingGraphParts<P> {
   segmentIndex: PackedRTree;
   store: VertexStore;
   remap: Int32Array;
+  groupKeys: readonly (GroupKey | undefined)[];
+  settings: GraphSettings;
+  diagnosticsLog: DiagnosticsLog | null;
 }
 
 /**
  * Immutable, query-independent routing graph. Everything is stored in flat typed arrays so a graph can be
- * built once and shared by any number of {@link LineFinder} instances (or engines).
+ * built once and shared by any number of {@link LineFinder} instances (or engines). Derived indexes
+ * (strong components, reverse adjacency, spatial indexes over vertices and nodes) are built lazily.
  */
 export class RoutingGraph<P = unknown> {
   readonly metric: Metric;
+  /** Latitude the metric was resolved for (used by `'cheap-ruler'`). */
+  readonly referenceLat: number;
   readonly features: readonly NetworkFeature<P>[];
   readonly stats: Readonly<GraphStats>;
   readonly vertices: VertexTable;
@@ -140,13 +197,24 @@ export class RoutingGraph<P = unknown> {
   readonly heuristic: { readonly dims: number; readonly scale: number };
   /** R-tree over chain segments, used for snapping. */
   readonly segmentIndex: PackedRTree;
-  private readonly store: VertexStore;
-  private readonly remap: Int32Array;
+  /** Connectivity group keys by index; index 0 is the default group (`undefined`). */
+  readonly groupKeys: readonly (GroupKey | undefined)[];
+  readonly settings: GraphSettings;
+  /** @internal */
+  readonly diagnosticsLog: DiagnosticsLog | null;
+  /** @internal */
+  readonly store: VertexStore;
+  /** @internal */
+  readonly remap: Int32Array;
   private vertexTree: { tree: PackedRTree; items: Int32Array } | null = null;
   private nodeTree: PackedRTree | null = null;
+  private scc: StrongComponents | null = null;
+  private reverse: ReverseEdgeTable | null = null;
+  private incident: NodeChainTable | null = null;
 
   constructor(parts: RoutingGraphParts<P>) {
     this.metric = parts.metric;
+    this.referenceLat = parts.referenceLat;
     this.features = parts.features;
     this.stats = parts.stats;
     this.vertices = parts.vertices;
@@ -159,6 +227,9 @@ export class RoutingGraph<P = unknown> {
     this.segmentIndex = parts.segmentIndex;
     this.store = parts.store;
     this.remap = parts.remap;
+    this.groupKeys = parts.groupKeys;
+    this.settings = parts.settings;
+    this.diagnosticsLog = parts.diagnosticsLog;
   }
 
   segmentCountOf(chain: number): number {
@@ -180,15 +251,51 @@ export class RoutingGraph<P = unknown> {
     return out;
   }
 
+  /** Measure along the source feature at fractional `position` of `chain` (see {@link SegmentTable}). */
+  measureAt(chain: number, position: number): number {
+    const n = this.segmentCountOf(chain);
+    const i = Math.min(Math.floor(position), n - 1);
+    const slot = this.chains.segStart[chain] + i;
+    const f = position - i;
+    const { measureStart, measureEnd } = this.segments;
+    return f === 0 ? measureStart[slot] : measureStart[slot] + f * (measureEnd[slot] - measureStart[slot]);
+  }
+
+  /** `feature.id`, falling back to `properties.id`. */
+  featureId(featureIndex: number): string | number | undefined {
+    const feature = this.features[featureIndex];
+    if (!feature) return undefined;
+    if (feature.id !== undefined) return feature.id;
+    const props = feature.properties as { id?: unknown } | null | undefined;
+    const id = props && typeof props === 'object' ? props.id : undefined;
+    return typeof id === 'string' || typeof id === 'number' ? id : undefined;
+  }
+
+  /** Group index of a key, or -1. `undefined` is the default group 0. */
+  groupIndex(key: GroupKey | undefined): number {
+    return this.groupKeys.indexOf(key);
+  }
+
   /** Whether a vertex is part of the routable graph. */
   isLiveVertex(vertex: number): boolean {
     return this.vertices.node[vertex] >= 0 || this.vertices.chain[vertex] >= 0;
   }
 
-  /** Vertex at (or within `tolerance` of) a coordinate, after connectivity repair; -1 when none. */
-  findVertex(x: number, y: number): number {
-    const v = this.store.find(x, y);
-    return v === -1 ? -1 : this.remap[v];
+  /**
+   * Vertex at (or within `tolerance` of) a coordinate, after connectivity repair; -1 when none. Without
+   * `group` every group is searched in order.
+   */
+  findVertex(x: number, y: number, group?: GroupKey): number {
+    if (group !== undefined) {
+      const g = this.groupIndex(group);
+      const v = g < 0 ? -1 : this.store.find(x, y, g);
+      return v === -1 ? -1 : this.remap[v];
+    }
+    for (let g = 0; g < this.groupKeys.length; g++) {
+      const v = this.store.find(x, y, g);
+      if (v !== -1) return this.remap[v];
+    }
+    return -1;
   }
 
   /** Lazily built R-tree over all live vertices (for `snap.mode = 'vertex'`). */
@@ -219,5 +326,100 @@ export class RoutingGraph<P = unknown> {
       this.nodeTree = tree;
     }
     return this.nodeTree;
+  }
+
+  /** Strongly connected components of the directed graph (computed once, lazily). */
+  strongComponents(): StrongComponents {
+    this.scc ??= strongComponents(this.nodes.count, this.edges.offsets, this.edges.targets);
+    return this.scc;
+  }
+
+  /** Incoming adjacency (computed once, lazily). */
+  reverseEdges(): ReverseEdgeTable {
+    if (!this.reverse) {
+      const N = this.nodes.count;
+      const { offsets, targets, costs, count } = this.edges;
+      const rOffsets = new Int32Array(N + 1);
+      for (let e = 0; e < count; e++) rOffsets[targets[e] + 1]++;
+      for (let n = 0; n < N; n++) rOffsets[n + 1] += rOffsets[n];
+      const cursor = rOffsets.slice(0, N);
+      const sources = new Int32Array(count);
+      const rCosts = new Float64Array(count);
+      const edges = new Int32Array(count);
+      for (let n = 0; n < N; n++) {
+        for (let e = offsets[n]; e < offsets[n + 1]; e++) {
+          const k = cursor[targets[e]]++;
+          sources[k] = n;
+          rCosts[k] = costs[e];
+          edges[k] = e;
+        }
+      }
+      this.reverse = { offsets: rOffsets, sources, costs: rCosts, edges };
+    }
+    return this.reverse;
+  }
+
+  /** Chains touching each node, passable or not (computed once, lazily). */
+  nodeChains(): NodeChainTable {
+    if (!this.incident) {
+      const N = this.nodes.count;
+      const { from, to, count } = this.chains;
+      const offsets = new Int32Array(N + 1);
+      for (let c = 0; c < count; c++) {
+        offsets[from[c] + 1]++;
+        offsets[to[c] + 1]++;
+      }
+      for (let n = 0; n < N; n++) offsets[n + 1] += offsets[n];
+      const cursor = offsets.slice(0, N);
+      const chains = new Int32Array(offsets[N]);
+      const atStart = new Uint8Array(offsets[N]);
+      for (let c = 0; c < count; c++) {
+        let k = cursor[from[c]]++;
+        chains[k] = c;
+        atStart[k] = 1;
+        k = cursor[to[c]]++;
+        chains[k] = c;
+      }
+      this.incident = { offsets, chains, atStart };
+    }
+    return this.incident;
+  }
+
+  /**
+   * Locates dead ends, near misses, components, collinear overlaps and — when built with
+   * `diagnostics: true` — every repair and invalid coordinate.
+   */
+  diagnostics(options?: DiagnosticsOptions): GraphDiagnostics {
+    return diagnoseGraph(this as RoutingGraph<unknown>, options);
+  }
+
+  /**
+   * Serialises the graph into plain buffers that `postMessage` can transfer (or share with `shared: true`).
+   * Features are not included: pass them to {@link fromTransferable} when sections need their properties.
+   */
+  toTransferable(options?: SerializeOptions): TransferableGraph {
+    return graphToTransferable(this as RoutingGraph<unknown>, options);
+  }
+
+  /** Rebuilds a graph from {@link toTransferable} output without copying the buffers. */
+  static fromTransferable<P = unknown>(
+    data: TransferableGraph,
+    options?: DeserializeOptions<P>,
+  ): RoutingGraph<P> {
+    return graphFromTransferable(data, options);
+  }
+
+  /** Source features touching a node (in chain order, without duplicates). */
+  nodeFeatures(node: number): number[] {
+    const { offsets, chains, atStart } = this.nodeChains();
+    const { segStart } = this.chains;
+    const feature = this.segments.feature;
+    const out: number[] = [];
+    for (let k = offsets[node]; k < offsets[node + 1]; k++) {
+      const c = chains[k];
+      const f = feature[atStart[k] ? segStart[c] : segStart[c + 1] - 1];
+      if (!out.includes(f)) out.push(f);
+    }
+    return out;
   }
 }

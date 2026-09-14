@@ -42,22 +42,34 @@ export interface NormalizedWeight {
   backward: number;
 }
 
-function toCost(value: unknown, where: string): number {
+/**
+ * What a weight of `0` means: `'impassable'` (default, the geojson-path-finder contract) or `'free'` — a
+ * zero-cost passage such as a connector between levels.
+ */
+export type ZeroWeight = 'impassable' | 'free';
+
+function toCost(value: unknown, where: string, zeroIsFree: boolean): number {
   if (typeof value === 'number') {
     if (value > 0 && value < Infinity) return value;
     if (value < 0) throw new RangeError(`Negative weight ${value} returned for ${where}.`);
-    return Infinity; // 0, NaN and +Infinity all mean "cannot pass"
+    if (value === 0 && zeroIsFree) return 0;
+    return Infinity; // 0 (by default), NaN and +Infinity all mean "cannot pass"
   }
   if (value === null || value === undefined || value === false) return Infinity;
   throw new TypeError(`Unsupported weight value ${JSON.stringify(value)} returned for ${where}.`);
 }
 
-export function normalizeWeight(value: WeightResult, out: NormalizedWeight, where: string): void {
+export function normalizeWeight(
+  value: WeightResult,
+  out: NormalizedWeight,
+  where: string,
+  zeroIsFree = false,
+): void {
   if (typeof value === 'object' && value !== null) {
-    out.forward = toCost(value.forward, where);
-    out.backward = toCost(value.backward, where);
+    out.forward = toCost(value.forward, where, zeroIsFree);
+    out.backward = toCost(value.backward, where, zeroIsFree);
   } else {
-    const cost = toCost(value, where);
+    const cost = toCost(value, where, zeroIsFree);
     out.forward = cost;
     out.backward = cost;
   }
