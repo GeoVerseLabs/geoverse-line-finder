@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>geoverse-line-finder playground</title>
+    <meta
+      name="description"
+      content="Interactive playground for geoverse-line-finder: weighted shortest paths on GeoJSON line networks, running entirely in the browser."
+    />
+    <script type="module" crossorigin src="./assets/index-Vk53yK-_.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-B2_lxdQV.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header__title">
+        <h1>geoverse-line-finder</h1>
+        <p>浏览器里跑的互动示例 · runs entirely in your browser, zero runtime dependencies</p>
+      </div>
+      <nav class="site-header__links">
+        <a href="https://github.com/GeoVerseLabs/geoverse-line-finder">GitHub</a>
+        <a href="https://www.npmjs.com/package/geoverse-line-finder">npm</a>
+        <a href="https://github.com/GeoVerseLabs/geoverse-line-finder#readme">README</a>
+        <a href="https://github.com/GeoVerseLabs/geoverse-line-finder/blob/main/docs/ARCHITECTURE.md"
+          >Architecture</a
+        >
+      </nav>
+    </header>
+
+    <nav class="tabs" id="tabs" role="tablist"></nav>
+
+    <main class="layout">
+      <aside class="panel panel--controls">
+        <p class="blurb" id="blurb"></p>
+        <div class="option-group" id="options"></div>
+        <div class="actions">
+          <button id="clear" type="button">清空 · Clear</button>
+          <button id="undo" type="button">撤销一个 · Undo</button>
+        </div>
+        <div class="presets" id="presets"></div>
+      </aside>
+
+      <section class="panel panel--map">
+        <svg id="map" preserveAspectRatio="xMidYMid meet"></svg>
+        <p class="hint">点击地图添加途经点（≥ 2 个）· Click the map to add waypoints</p>
+      </section>
+
+      <aside class="panel panel--results">
+        <div id="summary" class="summary"></div>
+        <div id="waypoints-table"></div>
+        <div id="measures"></div>
+        <div id="extra"></div>
+        <details id="json-details">
+          <summary>原始结果 JSON · raw result JSON</summary>
+          <pre id="json-output"></pre>
+        </details>
+      </aside>
+    </main>
+
+    <footer class="site-footer">
+      <p>
+        <a href="https://github.com/GeoVerseLabs/geoverse-line-finder/blob/main/CHANGELOG.md">CHANGELOG</a> ·
+        <a href="https://github.com/GeoVerseLabs/geoverse-line-finder/blob/main/docs/BENCHMARK.md"
+          >BENCHMARK</a
+        >
+        ·
+        <a href="https://github.com/GeoVerseLabs/geoverse-line-finder/blob/main/docs/UPGRADING.md"
+          >UPGRADING</a
+        >
+        · Apache-2.0
+      </p>
+    </footer>
+
+  </body>
+</html>
