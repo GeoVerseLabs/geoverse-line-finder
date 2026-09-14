@@ -84,6 +84,72 @@ The same 60 random pairs (OSM time weight), compared with a naive referee that s
 
 Conclusion: when geojson-path-finder compacts degree-2 vertices, `if (!neighbor[otherNeighborKey] && weightFromNeighbor)` adds a bypass only if the two neighbours have **no** edge yet; if a more expensive one exists (a parallel road, the opposite carriageway, or a longer chain compacted earlier), the cheaper bypass is dropped and the shortest path disappears from the compacted graph. Re-pricing its returned path with the referee gives exactly the weight it reports — the path is valid, just not the shortest. Versions 2.0.2 and 2.1.0 share this line.
 
+## 5. 0.2.0 feature benchmarks (`pnpm bench:features`)
+
+> 2026-09-14, same machine and method as above; the 0.1.0 baseline is the package published on npm (devDependency alias `glf-baseline`). The comparison with 0.1.0 uses the **built** package (`dist/`), so run `pnpm build` first; running the sources under tsx makes graph builds look about 20 % slower.
+
+### 5.1 Default configuration vs 0.1.0 (9 rounds)
+
+| Scenario                                     | Version | Init ms             | All queries ms      | Per query µs p50 / p95 | Found | Weight mismatches |
+| -------------------------------------------- | ------- | ------------------- | ------------------- | ---------------------- | ----- | ----------------- |
+| large-network distance, edge snapping        | 0.1.0   | 236.4 [183.6–249.4] | 284.4 [197.9–310.9] | 671 / 2495             | 300   | 0                 |
+|                                              | 0.2.0   | 251.2 [204.0–287.1] | 338.3 [208.6–367.4] | 781 / 2921             | 300   | 0                 |
+| large-network OSM travel time, edge snapping | 0.1.0   | 202.3 [181.7–231.5] | 222.2 [208.6–274.1] | 619 / 1940             | 291   | 0                 |
+|                                              | 0.2.0   | 234.4 [195.4–250.6] | 232.1 [218.1–256.4] | 621 / 2040             | 291   | 0                 |
+| synthetic warehouse, 292 tasks × 8 waypoints | 0.1.0   | 1.4 [1.0–2.4]       | 81.4 [68.2–96.2]    | 239 / 560              | 292   | 0                 |
+|                                              | 0.2.0   | 1.5 [0.9–2.4]       | 91.9 [66.1–104.0]   | 260 / 582              | 292   | 0                 |
+
+- Every pair of ranges overlaps, so by our rules **no slowdown is concluded**; weights match query by query, and the golden-output tests additionally keep paths and `settled` / `relaxed` bit-identical.
+- The distance scenario shows the largest median gap, so it was re-checked with an alternating micro benchmark in one process (300 pairs, 12 rounds): 0.1.0 took 304.5 [197.3–327.7] ms and 0.2.0 317.6 [208.3–339.1] ms, with the same 1,166,663 settled nodes — noise again.
+- Two real costs the benchmark caught during development were fixed: measures first re-measured the original coordinates, making builds about 10 % slower (they now reuse the lengths from the weight loop); candidate descriptions (touching features, side, measure) were first built for every hit (they are now built on demand).
+
+### 5.2 Directed ALT landmarks (5 rounds, edge snapping, init includes landmark preparation)
+
+| Weight          | Engine                   | Init ms             | All queries ms          | Per query µs p50 / p95 | Found |
+| --------------- | ------------------------ | ------------------- | ----------------------- | ---------------------- | ----- |
+| OSM travel time | A\*                      | 198.8 [184.8–224.9] | 223.3 [169.1–244.3]     | 533 / 1959             | 293   |
+|                 | A\* + ALT (8, active 4)  | 220.3 [198.1–293.7] | **106.7** [102.0–118.2] | 234 / 1033             | 293   |
+|                 | A\* + ALT (16, active 4) | 272.9 [252.1–312.6] | 97.8 [69.3–123.0]       | 215 / 915              | 293   |
+| distance        | A\*                      | 209.1 [174.8–286.2] | 283.8 [278.5–296.4]     | 666 / 2805             | 295   |
+|                 | A\* + ALT (8, active 4)  | 370.5 [324.4–392.4] | **172.3** [160.4–183.0] | 389 / 1679             | 295   |
+|                 | A\* + ALT (16, active 4) | 388.7 [328.2–484.5] | 158.2 [142.0–167.5]     | 375 / 1399             | 295   |
+
+- Against the acceptance criteria of the directed ALT design: 8 landmarks make the OSM travel-time scenario 2.09× faster (≥ 2×, non-overlapping) and the distance scenario 1.65× faster (it must not get slower); preparing 8 landmarks on the OSM graph takes 37.9 [33.5–43.5] ms and 1.6 MB (limits: ≤ 300 ms, ≤ 10 MB). All weights match plain A\*.
+- 16 landmarks are only about 10 % faster than 8 while doubling preparation time and memory, hence the defaults: 8 landmarks, 4 active per query.
+
+### 5.3 Bidirectional Dijkstra without a heuristic (9 rounds, custom metric without an embedding)
+
+| Engine                 | Init ms             | All queries ms          | Per query µs p50 / p95 | Found |
+| ---------------------- | ------------------- | ----------------------- | ---------------------- | ----- |
+| Dijkstra               | 263.8 [180.2–365.2] | 727.0 [711.6–827.9]     | 2390 / 5305            | 297   |
+| bidirectional Dijkstra | 243.4 [185.6–415.8] | **652.0** [514.1–710.2] | 1859 / 4651            | 297   |
+
+- About 10 % faster overall and about 20 % faster at the median query; with 9 rounds the ranges just separate (with 5 rounds they still overlapped by 2.5 ms) — a small but real gain. A\* with an embedding is far faster, so this is a registrable option, not the default engine.
+- The first implementation called a closure per relaxation and looked up a `Map` per expansion and was 1.7× slower than one-directional Dijkstra; the numbers above come after inlining those loops.
+
+### 5.4 Cost of optimal selection (AC7, 5 rounds, synthetic warehouse, 292 tasks × 8 waypoints)
+
+| Configuration                                 | All queries ms      | Per query µs p50 / p95 | Found |
+| --------------------------------------------- | ------------------- | ---------------------- | ----- |
+| nearest selection (`connectivity: 'nearest'`) | 49.6 [47.8–57.0]    | 152 / 298              | 292   |
+| optimal selection, K = 1                      | 60.7 [59.5–76.4]    | 194 / 388              | 292   |
+| optimal selection, K = 4 (default)            | 100.2 [92.7–105.7]  | 291 / 716              | 292   |
+| optimal selection, K = 8                      | 132.4 [126.9–154.5] | 403 / 937              | 292   |
+
+K = 4 costs about 2.0× nearest selection (limit ≤ 5×). Optimal selection with K = 1 goes through the general multi-source, multi-target search and is about 20 % slower than nearest selection; the default configuration still takes the nearest-selection path (see 5.1).
+
+### 5.5 What optimal selection saves over nearest snapping (counts from one evaluation, not timings)
+
+300 random pairs per scenario (5–40 m off the road), comparing network cost plus the snap costs at both ends.
+
+| Network                  | Snap cost           | Nearest unreachable, optimal reachable | Gain p50 / p90 / max    | Gain > 1 % / > 10 % |
+| ------------------------ | ------------------- | -------------------------------------- | ----------------------- | ------------------- |
+| OSM travel time, one-way | distance at 10 km/h | 7 / 300                                | 0.07% / 12.82% / 86.19% | 111 / 35            |
+| distance (km), two-way   | distance            | 5 / 300                                | 0.24% / 2.17% / 36.90%  | 54 / 2              |
+
+- On the one-way network the gain comes mostly from "the nearest road runs the wrong way" — the general value of optimal selection, unrelated to warehouses.
+- In the two-way distance scenario the gain is small, and part of it is snap legs cutting corners in a straight line; that is why optimal selection with `costMode: 'none'` drifts towards distant candidates, and why `'ends'` / `'arrive-depart'` together with `maxRelocation` are recommended (ARCHITECTURE §5.5).
+
 ## Reproducing
 
 - Do not run it alongside tests, builds or another benchmark; mind the power mode on laptops.
