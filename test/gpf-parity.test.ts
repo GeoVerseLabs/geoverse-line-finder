@@ -1,19 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { osmWeight, type OsmProps } from '../bench/osm-weight';
 import { LineFinder, type NetworkCollection, type Position } from '../src';
+import { findGpfData, gpfFixture as fixture } from './data';
 import { ReferenceGraph, mulberry32 } from './helpers';
 
 /**
  * Mirrors geojson-path-finder's own test-suite (test/path.spec.js) on the same fixtures, then compares
  * both libraries pair by pair on its large one-way OSM network when that file is available.
  */
-const fixture = (name: string) =>
-  JSON.parse(readFileSync(new URL(`./fixtures/gpf/${name}`, import.meta.url), 'utf8')) as NetworkCollection<
-    Record<string, unknown>
-  >;
 
 // geojson-path-finder's default weight is turf distance in kilometres.
 const km = (_a: Position, _b: Position, _p: unknown, ctx: { distance: number }) => ctx.distance / 1000;
@@ -147,23 +142,7 @@ describe('geojson-path-finder test-suite parity', () => {
 
 // ------------------------------------------------------------------------------------------------------
 
-function findLargeNetwork(): string | null {
-  const candidates = [
-    process.env.GLF_GPF_DATA && join(process.env.GLF_GPF_DATA, 'large-network.json'),
-    'D:/workspace/item/gis-project/item-gis-bam/node_modules/geojson-path-finder/test/large-network.json',
-  ];
-  try {
-    const require = createRequire(import.meta.url);
-    candidates.push(
-      join(dirname(require.resolve('geojson-path-finder/package.json')), 'test', 'large-network.json'),
-    );
-  } catch {
-    // geojson-path-finder not installed
-  }
-  return candidates.find((p): p is string => !!p && existsSync(p)) ?? null;
-}
-
-const LARGE = findLargeNetwork();
+const LARGE = findGpfData('large-network.json');
 
 describe.skipIf(!LARGE)('large one-way OSM network: independent referee and geojson-path-finder', () => {
   it('is optimal on every pair and never worse than geojson-path-finder', async () => {

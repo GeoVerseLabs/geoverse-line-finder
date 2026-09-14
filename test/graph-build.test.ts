@@ -212,6 +212,27 @@ describe('buildGraph', () => {
     ]);
   });
 
+  it('counts a dead end that already touches the segment (zero gap) as snapped', () => {
+    const tee = (gap: number) =>
+      fc([
+        line([
+          [0, 0],
+          [20, 0],
+        ]),
+        line([
+          [10, gap],
+          [10, 10],
+        ]),
+      ]);
+    for (const gap of [0, 0.3]) {
+      expect(buildGraph(tee(gap), { metric: 'euclidean' }).stats.components).toBe(2);
+      expect(buildGraph(tee(gap), { metric: 'euclidean', snapDangles: 0.5 }).stats).toMatchObject({
+        components: 1,
+        danglesSnapped: 1,
+      });
+    }
+  });
+
   it('nodes crossings and exact touches (splitIntersections)', () => {
     // An X at (5,5) and a T where line 3 starts on line 1 at (2,2). (Line 3 stops at y = 6 so it does not
     // also touch line 2, x + y = 10.)
