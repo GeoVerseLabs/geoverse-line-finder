@@ -80,7 +80,11 @@
     "check:types": "node scripts/check-types.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test:coverage && pnpm build && pnpm smoke && pnpm check:size && pnpm check:api",
     "check:package": "publint && attw --pack .",
-    "prepublishOnly": "pnpm check && pnpm check:package"
+    "prepublishOnly": "pnpm check && pnpm check:package",
+    "demo:dev": "vite examples/playground",
+    "demo:typecheck": "tsc -p examples/playground/tsconfig.json",
+    "demo:build": "pnpm demo:typecheck && vite build examples/playground",
+    "demo:preview": "vite preview examples/playground"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.3",
@@ -98,6 +102,7 @@
     "tsx": "^4.20.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.61.0",
+    "vite": "^7.3.6",
     "vitest": "^4.1.8"
   },
   "pnpm": {

@@ -3,7 +3,16 @@ import { defineConfig } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig(
-  { ignores: ['dist/**', 'coverage/**', 'node_modules/**', 'bench/results/**', 'etc/**'] },
+  {
+    ignores: [
+      'dist/**',
+      'coverage/**',
+      'node_modules/**',
+      'bench/results/**',
+      'etc/**',
+      'examples/playground/dist/**',
+    ],
+  },
   js.configs.recommended,
   tseslint.configs.recommended,
   {
@@ -17,6 +26,13 @@ export default defineConfig(
     files: ['scripts/**/*.mjs'],
     languageOptions: {
       globals: { console: 'readonly', process: 'readonly', URL: 'readonly' },
+    },
+  },
+  {
+    // The GitHub Pages demo: a browser app, not part of the published package.
+    files: ['examples/playground/src/**/*.ts'],
+    languageOptions: {
+      globals: { document: 'readonly', window: 'readonly', fetch: 'readonly' },
     },
   },
   {

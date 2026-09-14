@@ -16,6 +16,8 @@
 
 路径主体借鉴 [terra-route](https://github.com/JamesLMilner/terra-route)（CSR 邻接、四叉堆、scratch 复用），权重配置借鉴 [geojson-path-finder](https://github.com/perliedman/geojson-path-finder)。浏览器、Web Worker、Node 通用。
 
+**🗺️ [在线示例](https://GeoVerseLabs.github.io/geoverse-line-finder/)**——点地图放途经点，实时看候选吸附、全程择优（nearest / optimal 叠加对比）、失败策略（skip / straight）与拓扑诊断；源码在 [`examples/playground/`](examples/playground/)，本地跑：`pnpm demo:dev`。
+
 ## 安装
 
 ```bash
