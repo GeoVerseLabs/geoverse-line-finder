@@ -20,12 +20,18 @@ importers:
       '@vitest/coverage-v8':
         specifier: ^4.1.8
         version: 4.1.11(vitest@4.1.11)
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
       eslint:
         specifier: ^9.39.4
         version: 9.39.5
       geojson-path-finder:
         specifier: 2.1.0
         version: 2.1.0
+      glf-baseline:
+        specifier: npm:geoverse-line-finder@0.1.0
+        version: geoverse-line-finder@0.1.0
       prettier:
         specifier: ^3.8.4
         version: 3.9.6
@@ -49,7 +55,7 @@ importers:
         version: 8.70.0(eslint@9.39.5)(typescript@5.9.3)
       vitest:
         specifier: ^4.1.8
-        version: 4.1.11(@types/node@22.20.2)(@vitest/coverage-v8@4.1.11)(vite@8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13))
+        version: 4.1.11(@types/node@22.20.2)(@vitest/coverage-v8@4.1.11)(vite@8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13))
 
 packages:
 
@@ -1131,6 +1137,10 @@ packages:
 
   geojson-path-finder@2.1.0:
     resolution: {integrity: sha512-ngg+rxoUSkhjOpKaQ2VpuvY6v2o/12JF1JF09AUzMg5iOVJ2dKLfT4vr8NleEk5pVwmx3nANyH8rK8mCn90LSA==}
+
+  geoverse-line-finder@0.1.0:
+    resolution: {integrity: sha512-eP0Lt/Rx9qg8Ny1CeRoHIXB0cDta4z1F0d0DaUXBBtyvl0tRA6Rib8WAypZnEFoyymFzlOHHY+pg/XPXlxbtqQ==}
+    engines: {node: '>=18'}
 
   get-caller-file@2.0.5:
     resolution: {integrity: sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==}
@@ -2353,7 +2363,7 @@ snapshots:
       obug: 2.2.1
       std-env: 4.2.0
       tinyrainbow: 3.1.1
-      vitest: 4.1.11(@types/node@22.20.2)(@vitest/coverage-v8@4.1.11)(vite@8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13))
+      vitest: 4.1.11(@types/node@22.20.2)(@vitest/coverage-v8@4.1.11)(vite@8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13))
 
   '@vitest/expect@4.1.11':
     dependencies:
@@ -2364,13 +2374,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.1
 
-  '@vitest/mocker@4.1.11(vite@8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13))':
+  '@vitest/mocker@4.1.11(vite@8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13))':
     dependencies:
       '@vitest/spy': 4.1.11
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13)
+      vite: 8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13)
 
   '@vitest/pretty-format@4.1.11':
     dependencies:
@@ -2712,6 +2722,8 @@ snapshots:
       '@turf/explode': 7.4.0
       '@turf/helpers': 7.4.0
       tinyqueue: 2.0.3
+
+  geoverse-line-finder@0.1.0: {}
 
   get-caller-file@2.0.5: {}
 
@@ -3207,7 +3219,7 @@ snapshots:
 
   validate-npm-package-name@5.0.1: {}
 
-  vite@8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13):
+  vite@8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -3216,14 +3228,14 @@ snapshots:
       tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 22.20.2
-      esbuild: 0.27.7
+      esbuild: 0.28.2
       fsevents: 2.3.3
       tsx: 4.23.13
 
-  vitest@4.1.11(@types/node@22.20.2)(@vitest/coverage-v8@4.1.11)(vite@8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13)):
+  vitest@4.1.11(@types/node@22.20.2)(@vitest/coverage-v8@4.1.11)(vite@8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13)):
     dependencies:
       '@vitest/expect': 4.1.11
-      '@vitest/mocker': 4.1.11(vite@8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13))
+      '@vitest/mocker': 4.1.11(vite@8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13))
       '@vitest/pretty-format': 4.1.11
       '@vitest/runner': 4.1.11
       '@vitest/snapshot': 4.1.11
@@ -3240,7 +3252,7 @@ snapshots:
       tinyexec: 1.3.1
       tinyglobby: 0.2.17
       tinyrainbow: 3.1.1
-      vite: 8.3.0(@types/node@22.20.2)(esbuild@0.27.7)(tsx@4.23.13)
+      vite: 8.3.0(@types/node@22.20.2)(esbuild@0.28.2)(tsx@4.23.13)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 22.20.2

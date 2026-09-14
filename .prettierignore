@@ -4,3 +4,4 @@ node_modules
 pnpm-lock.yaml
 bench/results
 test/fixtures
+etc
