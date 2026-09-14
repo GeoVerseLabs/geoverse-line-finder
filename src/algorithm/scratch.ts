@@ -8,13 +8,17 @@ import type { SearchResult } from './types';
  * actually visits.
  */
 export class SearchScratch {
+  // Explicit element types: inferred fields would be emitted as `Float64Array<ArrayBuffer>`, which
+  // TypeScript < 5.7 cannot read in the published declarations.
   /** Best known cost per node; valid only where `seen[node] === stamp`. */
-  g = new Float64Array(0);
-  prevNode = new Int32Array(0);
-  prevEdge = new Int32Array(0);
-  seen = new Uint32Array(0);
+  g: Float64Array = new Float64Array(0);
+  prevNode: Int32Array = new Int32Array(0);
+  prevEdge: Int32Array = new Int32Array(0);
+  seen: Uint32Array = new Uint32Array(0);
   /** `closed[node] === stamp` once the node is settled. */
-  closed = new Uint32Array(0);
+  closed: Uint32Array = new Uint32Array(0);
+  /** `targetMark[node] === stamp` while `node` is a still unsettled target of a multi-target search. */
+  targetMark: Uint32Array = new Uint32Array(0);
   stamp = 0;
   readonly heap: Heap;
 
@@ -31,11 +35,13 @@ export class SearchScratch {
       this.prevEdge = new Int32Array(capacity);
       this.seen = new Uint32Array(capacity);
       this.closed = new Uint32Array(capacity);
+      this.targetMark = new Uint32Array(capacity);
       this.stamp = 0;
     }
     if (this.stamp >= 0xfffffffe) {
       this.seen.fill(0);
       this.closed.fill(0);
+      this.targetMark.fill(0);
       this.stamp = 0;
     }
     this.heap.clear();
