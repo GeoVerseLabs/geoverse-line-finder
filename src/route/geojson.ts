@@ -1,5 +1,5 @@
 import type { LineStringFeature } from '../types';
-import type { RouteResult } from './finder';
+import type { RouteResult } from './types';
 
 export interface RouteSummary {
   weight: number;

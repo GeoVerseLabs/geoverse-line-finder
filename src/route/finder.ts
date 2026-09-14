@@ -1,21 +1,68 @@
+import {
+  LandmarkTable,
+  landmarkHeuristic,
+  prepareLandmarks,
+  type LandmarkOptions,
+} from '../algorithm/landmarks';
 import { createAlgorithmRegistry, type AlgorithmRegistry } from '../algorithm/registry';
 import { SearchScratch } from '../algorithm/scratch';
 import type { Heuristic, PathAlgorithm } from '../algorithm/types';
 import { buildGraph, type GraphOptions } from '../graph/build';
 import { RoutingGraph } from '../graph/graph';
-import { isPosition } from '../graph/topology';
 import type { HeapConstructor } from '../heap/heap';
 import {
-  findSnapCandidates,
-  sameAnchor,
-  snapWaypoints,
+  searchCandidates,
+  type CandidateInfo,
   type SnapCandidate,
   type SnapMode,
   type SnapOptions,
+  type WaypointRole,
 } from '../snap/snap';
 import type { NetworkCollection, Position, WaypointInput } from '../types';
-import { assemblePieces, edgePiece, partialCost, type RouteSection } from './assemble';
+import type { SectionsDetail } from './assemble';
+import { composeRoute, type PolicyOptions, type WaypointSpec } from './compose';
+import { snapPoint, solveOneToMany, type SnappedPoint } from './many';
+import { planNearest } from './nearest';
+import { planOptimal } from './optimal';
+import { candidateAcceptor, readWaypoint, resolveSnap } from './options';
 import { QueryGraph } from './query-graph';
+import type { RouteContext } from './search';
+import type {
+  CandidateOptions,
+  ConnectorMode,
+  ManyOptions,
+  ManyResult,
+  MatrixResult,
+  NearestResult,
+  RouteFailure,
+  RouteFailureReason,
+  RouteOptions,
+  RouteResult,
+  SearchBudget,
+} from './types';
+
+export type {
+  CandidateOptions,
+  CandidateReport,
+  CandidateStatus,
+  ConnectorMode,
+  FailurePolicy,
+  ManyOptions,
+  ManyResult,
+  MatrixResult,
+  NearestResult,
+  RouteFailure,
+  RouteFailureDetail,
+  RouteFailureReason,
+  RouteLeg,
+  RouteOptions,
+  RouteResult,
+  RouteSuccess,
+  SearchBudget,
+  SkippedWaypoint,
+  SnappedWaypoint,
+  WaypointAccess,
+} from './types';
 
 export interface LineFinderOptions<P = unknown> extends GraphOptions<P> {
   /** Default engine for {@link LineFinder.route}. Default `'astar'`. */
@@ -24,96 +71,51 @@ export interface LineFinderOptions<P = unknown> extends GraphOptions<P> {
   algorithms?: AlgorithmRegistry;
   /** Priority queue used by the engines. Default {@link FourAryHeap}. */
   heap?: HeapConstructor;
-  /** Default snapping behaviour, overridable per route. */
-  snap?: SnapOptions;
-}
-
-export interface RouteOptions {
-  algorithm?: string | PathAlgorithm;
+  /** Default snapping behaviour, overridable per route and per waypoint. */
   snap?: SnapOptions;
   /**
-   * Prepend the raw start input and append the raw end input as straight connectors when they differ
-   * from their snapped locations. Geometry only: `weight` and `distance` cover the network part.
+   * ALT landmarks for faster A* (off by default): a table from {@link prepareLandmarks}, or its options to
+   * build one now (two full searches per landmark). Worth it for large directed or time-weighted networks.
    */
-  connectors?: boolean;
+  landmarks?: LandmarkTable | LandmarkOptions;
 }
 
-export interface SnappedWaypoint {
-  /** The coordinate that was asked for. */
-  input: Position;
-  /** Where it attached to the network. */
-  location: Position;
-  /** Distance between the two (metric units). */
-  distance: number;
-  component: number;
-  featureIndex: number;
+function roleOf(index: number, count: number): WaypointRole {
+  return index === 0 ? 'origin' : index === count - 1 ? 'destination' : 'via';
 }
 
-export interface RouteLeg<P = unknown> {
-  /** Waypoint indices joined by this leg. */
-  from: number;
-  to: number;
-  path: Position[];
-  weight: number;
-  distance: number;
-  sections: RouteSection<P>[];
-  /** Engine statistics for this leg. */
-  settled: number;
-  relaxed: number;
+function resolveBudget(budget: SearchBudget | undefined): { maxCost: number; maxSettled: number } {
+  const maxCost = budget?.maxCost ?? Infinity;
+  const maxSettled = budget?.maxSettled ?? Infinity;
+  if (!(maxCost >= 0)) throw new RangeError(`budget.maxCost must be ≥ 0, got ${String(maxCost)}.`);
+  if (!(maxSettled >= 1)) throw new RangeError(`budget.maxSettled must be ≥ 1, got ${String(maxSettled)}.`);
+  return { maxCost, maxSettled };
 }
 
-export interface RouteSuccess<P = unknown> {
-  ok: true;
-  /** Full route geometry; coordinates may be shared with the input network — copy before mutating. */
-  path: Position[];
-  /** Total cost (the quantity that was minimised). */
-  weight: number;
-  /** Total length along the network (metric units). */
-  distance: number;
-  legs: RouteLeg<P>[];
-  waypoints: SnappedWaypoint[];
-  algorithm: string;
-}
-
-export type RouteFailureReason = 'INVALID_INPUT' | 'SNAP_FAILED' | 'DISCONNECTED' | 'UNREACHABLE';
-
-export interface RouteFailure {
-  ok: false;
-  reason: RouteFailureReason;
-  message: string;
-  waypointIndex?: number;
-  legIndex?: number;
-  waypoints?: SnappedWaypoint[];
-  algorithm: string;
-}
-
-export type RouteResult<P = unknown> = RouteSuccess<P> | RouteFailure;
-
-export interface NearestResult {
-  location: Position;
-  distance: number;
-  component: number;
-  featureIndex: number;
-}
-
-type LegCore<P> = Omit<RouteLeg<P>, 'from' | 'to'>;
-
-function toPosition(input: unknown): Position | null {
-  if (isPosition(input)) return input;
-  if (input && typeof input === 'object') {
-    const o = input as { type?: unknown; geometry?: unknown; coordinates?: unknown };
-    const geometry = (o.type === 'Feature' ? o.geometry : o) as {
-      type?: unknown;
-      coordinates?: unknown;
-    } | null;
-    if (geometry && geometry.type === 'Point' && isPosition(geometry.coordinates))
-      return geometry.coordinates;
+function resolveDetail(detail: SectionsDetail | undefined): SectionsDetail {
+  if (detail === undefined) return 'feature';
+  if (detail !== 'feature' && detail !== 'measure' && detail !== 'segment') {
+    throw new RangeError(`sectionsDetail must be "feature", "measure" or "segment", got ${String(detail)}.`);
   }
-  return null;
+  return detail;
 }
 
-function samePoint(a: Position, b: Position): boolean {
-  return a[0] === b[0] && a[1] === b[1];
+function resolvePolicy(options: RouteOptions): PolicyOptions {
+  const policy = options.onFailure ?? 'fail';
+  if (policy !== 'fail' && policy !== 'skip' && policy !== 'straight') {
+    throw new RangeError(`onFailure must be "fail", "skip" or "straight", got ${String(policy)}.`);
+  }
+  const maxSkips = options.skip?.max ?? Infinity;
+  if (!(maxSkips >= 0)) throw new RangeError(`skip.max must be ≥ 0, got ${String(maxSkips)}.`);
+  const straightCost = options.straightCost ?? ((d: number) => d);
+  if (typeof straightCost !== 'function') throw new TypeError('straightCost must be a function.');
+  return {
+    policy,
+    leading: options.skip?.leading === true,
+    maxSkips,
+    straightCost,
+    debug: options.debug?.candidates === true,
+  };
 }
 
 /**
@@ -128,6 +130,8 @@ function samePoint(a: Position, b: Position): boolean {
 export class LineFinder<P = unknown> {
   readonly graph: RoutingGraph<P>;
   readonly algorithms: AlgorithmRegistry;
+  /** Landmark table used by heuristic engines, if any. */
+  readonly landmarks: LandmarkTable | null;
   private readonly defaultAlgorithm: string | PathAlgorithm;
   private readonly defaultSnap: SnapOptions;
   private readonly scratch: SearchScratch;
@@ -142,6 +146,16 @@ export class LineFinder<P = unknown> {
     this.defaultSnap = { ...options.snap };
     this.scratch = new SearchScratch(options.heap);
     this.query = new QueryGraph(this.graph);
+    const landmarks = options.landmarks;
+    this.landmarks =
+      landmarks instanceof LandmarkTable
+        ? landmarks
+        : landmarks
+          ? prepareLandmarks(this.graph as RoutingGraph<unknown>, landmarks)
+          : null;
+    if (this.landmarks && !this.landmarks.matches(this.graph as RoutingGraph<unknown>)) {
+      throw new RangeError('The landmark table was built for a different graph.');
+    }
   }
 
   /** Registers an engine on this finder's registry (chainable). */
@@ -160,19 +174,52 @@ export class LineFinder<P = unknown> {
     point: WaypointInput,
     options: { mode?: SnapMode; maxDistance?: number } = {},
   ): NearestResult | null {
-    const p = toPosition(point);
-    if (!p) throw new TypeError('Expected a position, Point geometry or Point feature.');
-    const mode = options.mode ?? this.defaultSnap.mode ?? 'edge';
-    const maxDistance = options.maxDistance ?? this.defaultSnap.maxDistance ?? Infinity;
-    const [c] = findSnapCandidates(this.graph, p[0], p[1], mode, maxDistance, 1, 1);
+    const parsed = readWaypoint(point);
+    if (!parsed) throw new TypeError('Expected a position, Point geometry or Point feature.');
+    const [x, y] = parsed.position;
+    const { list } = searchCandidates(this.graph, x, y, {
+      mode: options.mode ?? this.defaultSnap.mode ?? 'edge',
+      maxDistance: options.maxDistance ?? this.defaultSnap.maxDistance ?? Infinity,
+      limit: 1,
+      searchLimit: 1,
+      distinct: 'component',
+      accept: null,
+    });
+    const c = list[0];
     return c
       ? { location: c.point, distance: c.distance, component: c.component, featureIndex: c.featureIndex }
       : null;
   }
 
   /**
-   * Route through `waypoints` in the given order (two or more). Each consecutive pair is one leg; the
-   * route fails as a whole if any leg is impossible, reporting which one.
+   * The allowed snap locations of a point, nearest first, after the constraints of `options` (and of a
+   * `{ coordinates, snap }` input). Returns up to `candidates` (default 16) — for diagnostics or custom logic.
+   */
+  candidates(point: WaypointInput, options: CandidateOptions = {}): CandidateInfo[] {
+    const parsed = readWaypoint(point);
+    if (!parsed)
+      throw new TypeError('Expected a position, Point geometry, Point feature or { coordinates }.');
+    const { role, ...snapOptions } = options;
+    const base: SnapOptions = { ...this.defaultSnap, ...snapOptions };
+    base.candidates = options.candidates ?? parsed.snap?.candidates ?? 16;
+    const snap = resolveSnap(base, parsed.snap ? { ...parsed.snap, candidates: base.candidates } : undefined);
+    const context = { index: 0, input: parsed.position, role: role ?? 'origin' };
+    const [x, y] = parsed.position;
+    return searchCandidates(this.graph, x, y, {
+      mode: snap.mode,
+      maxDistance: snap.maxDistance,
+      limit: snap.candidates,
+      searchLimit: snap.searchLimit,
+      distinct: snap.distinctBy,
+      accept: candidateAcceptor(this.graph, snap, context),
+      group: snap.group,
+    }).list.map((c) => c.info);
+  }
+
+  /**
+   * Route through `waypoints` in the given order (two or more). Each consecutive pair is one leg. By default
+   * the route fails as a whole if any waypoint cannot be snapped or reached, reporting which one; see
+   * `onFailure`, and `snap.selection` for choosing locations by total cost instead of distance.
    */
   route(waypoints: readonly WaypointInput[], options: RouteOptions = {}): RouteResult<P> {
     const algorithm = this.algorithms.resolve(options.algorithm ?? this.defaultAlgorithm);
@@ -185,138 +232,196 @@ export class LineFinder<P = unknown> {
     if (!Array.isArray(waypoints) || waypoints.length < 2) {
       return fail('INVALID_INPUT', 'A route needs at least two waypoints.');
     }
-    const inputs: Position[] = [];
+    const parsed = [];
     for (let i = 0; i < waypoints.length; i++) {
-      const p = toPosition(waypoints[i]);
-      if (!p)
+      const p = readWaypoint(waypoints[i]);
+      if (!p) {
         return fail('INVALID_INPUT', `Waypoint #${i} is not a position, Point or Point feature.`, {
           waypointIndex: i,
         });
-      inputs.push(p);
-    }
-
-    const snapped = snapWaypoints(this.graph, inputs, { ...this.defaultSnap, ...options.snap });
-    if (!snapped.ok) return fail(snapped.reason, snapped.message, { waypointIndex: snapped.waypointIndex });
-    const snaps = snapped.snaps;
-    const waypointsOut: SnappedWaypoint[] = snaps.map((s, i) => ({
-      input: inputs[i],
-      location: s.point,
-      distance: s.distance,
-      component: s.component,
-      featureIndex: s.featureIndex,
-    }));
-
-    const legs: RouteLeg<P>[] = [];
-    for (let i = 0; i + 1 < snaps.length; i++) {
-      const leg = this.solveLeg(snaps[i], snaps[i + 1], algorithm);
-      if (!leg) {
-        return fail('UNREACHABLE', `No path from waypoint #${i} to waypoint #${i + 1}.`, {
-          legIndex: i,
-          waypoints: waypointsOut,
-        });
       }
-      legs.push({ from: i, to: i + 1, ...leg });
+      parsed.push(p);
     }
 
-    const path: Position[] = [];
-    let weight = 0;
-    let distance = 0;
-    for (const leg of legs) {
-      weight += leg.weight;
-      distance += leg.distance;
-      // Consecutive legs meet at the shared waypoint location: drop the duplicate.
-      for (let j = path.length > 0 ? 1 : 0; j < leg.path.length; j++) path.push(leg.path[j]);
+    const snapOptions: SnapOptions = { ...this.defaultSnap, ...options.snap };
+    const routeSnap = resolveSnap(snapOptions);
+    const n = parsed.length;
+    const specs: WaypointSpec[] = parsed.map((p, i) => ({
+      input: p.position,
+      snap: p.snap ? resolveSnap(snapOptions, p.snap) : routeSnap,
+      context: { index: i, input: p.position, role: roleOf(i, n) },
+    }));
+    const policy = resolvePolicy(options);
+    const connectors = options.connectors;
+    if (
+      connectors !== undefined &&
+      typeof connectors !== 'boolean' &&
+      connectors !== 'ends' &&
+      connectors !== 'legs'
+    ) {
+      throw new RangeError(`connectors must be a boolean, "ends" or "legs", got ${String(connectors)}.`);
     }
-    if (options.connectors) {
-      const first = inputs[0];
-      const last = inputs[inputs.length - 1];
-      if (!samePoint(first, path[0])) path.unshift(first);
-      if (!samePoint(last, path[path.length - 1])) path.push(last);
+    const sectionsDetail = resolveDetail(options.sectionsDetail);
+    const ctx = this.context(algorithm, options.budget);
+
+    const plan =
+      routeSnap.selection === 'optimal'
+        ? planOptimal(ctx, routeSnap, specs, policy)
+        : planNearest(ctx, routeSnap, specs, policy);
+    if (!plan.ok) {
+      const { ok: _ok, reason, message, ...extra } = plan;
+      return fail(reason, message, extra);
     }
-    return { ok: true, path, weight, distance, legs, waypoints: waypointsOut, algorithm: algorithm.name };
+    const connectorMode: false | ConnectorMode = connectors === true ? 'ends' : connectors || false;
+    return composeRoute(this.graph, plan, {
+      connectors: connectorMode,
+      includeSnapWeight: options.totals?.includeSnapWeight === true,
+      includeConnectorDistance: options.totals?.includeConnectorDistance === true,
+      sectionsDetail,
+      algorithm: algorithm.name,
+    });
   }
 
-  private solveLeg(a: SnapCandidate, b: SnapCandidate, algorithm: PathAlgorithm): LegCore<P> | null {
-    if (sameAnchor(a.anchor, b.anchor)) {
-      return { path: [a.point], weight: 0, distance: 0, sections: [], settled: 0, relaxed: 0 };
+  /**
+   * Weights (and optionally routes) from one point to many, with a single search tree. Every point snaps
+   * to its nearest allowed location.
+   */
+  oneToMany(
+    source: WaypointInput,
+    targets: readonly WaypointInput[],
+    options: ManyOptions = {},
+  ): ManyResult<P> | RouteFailure {
+    const algorithm = this.algorithms.resolve(options.algorithm ?? this.defaultAlgorithm);
+    const snapped = this.snapMany([source, ...targets], options, algorithm.name);
+    if (!Array.isArray(snapped)) return snapped;
+    const [origin, ...points] = snapped;
+    if (!origin.candidate) {
+      return {
+        ok: false,
+        reason: 'SNAP_FAILED',
+        message: `No network location found for the source.`,
+        waypointIndex: 0,
+        algorithm: algorithm.name,
+      };
     }
-    const graph = this.graph;
-    const q = this.query;
-    const chains = graph.chains;
-    q.reset();
-
-    let source: number;
-    if (a.anchor.kind === 'node') {
-      source = a.anchor.node;
-    } else {
-      source = q.virtualSource;
-      const { chain, position } = a.anchor;
-      const n = graph.segmentCountOf(chain);
-      q.add(source, chains.from[chain], chain, position, 0, partialCost(graph, chain, position, 0));
-      q.add(source, chains.to[chain], chain, position, n, partialCost(graph, chain, position, n));
-    }
-    let target: number;
-    if (b.anchor.kind === 'node') {
-      target = b.anchor.node;
-    } else {
-      target = q.virtualTarget;
-      const { chain, position } = b.anchor;
-      const n = graph.segmentCountOf(chain);
-      q.add(chains.from[chain], target, chain, 0, position, partialCost(graph, chain, 0, position));
-      q.add(chains.to[chain], target, chain, n, position, partialCost(graph, chain, n, position));
-      if (a.anchor.kind === 'chain' && a.anchor.chain === chain) {
-        const start = a.anchor.position;
-        q.add(source, target, chain, start, position, partialCost(graph, chain, start, position));
-      }
-    }
-
-    if (!this.mayConnect(source, target)) return null;
-    const heuristic = algorithm.usesHeuristic ? this.heuristicTo(b.point) : null;
-    const result = algorithm.search({ graph: q, source, target, heuristic, scratch: this.scratch });
-    if (!result.found) return null;
-
-    const pieces = result.edges.map((e) =>
-      e < q.baseEdgeCount ? edgePiece(graph, e) : q.piece(e - q.baseEdgeCount),
+    const ctx = this.context(algorithm, options.budget);
+    const core = solveOneToMany(
+      ctx,
+      origin.candidate,
+      points,
+      options.paths === true,
+      resolveDetail(options.sectionsDetail),
     );
-    const assembled = assemblePieces(graph, pieces);
+    const result: ManyResult<P> = {
+      ok: true,
+      source: origin.output!,
+      targets: points.map((p) => p.output),
+      weights: core.weights,
+      distances: core.distances,
+      settled: core.settled,
+      relaxed: core.relaxed,
+      algorithm: algorithm.name,
+    };
+    if (core.legs) result.legs = core.legs;
+    return result;
+  }
+
+  /** Weight matrix between origins and destinations (one search per origin). */
+  matrix(
+    origins: readonly WaypointInput[],
+    destinations: readonly WaypointInput[],
+    options: ManyOptions = {},
+  ): MatrixResult | RouteFailure {
+    const algorithm = this.algorithms.resolve(options.algorithm ?? this.defaultAlgorithm);
+    const snapped = this.snapMany([...origins, ...destinations], options, algorithm.name);
+    if (!Array.isArray(snapped)) return snapped;
+    const from = snapped.slice(0, origins.length);
+    const to = snapped.slice(origins.length);
+    const ctx = this.context(algorithm, options.budget);
+    const weights: number[][] = [];
+    const distances: number[][] = [];
+    for (const origin of from) {
+      if (!origin.candidate) {
+        weights.push(to.map(() => Infinity));
+        distances.push(to.map(() => Infinity));
+        continue;
+      }
+      const core = solveOneToMany(ctx, origin.candidate, to, false, 'feature');
+      weights.push(core.weights);
+      distances.push(core.distances);
+    }
     return {
-      path: assembled.path.length > 0 ? assembled.path : [a.point],
-      weight: result.cost,
-      distance: assembled.distance,
-      sections: assembled.sections,
-      settled: result.settled,
-      relaxed: result.relaxed,
+      ok: true,
+      origins: from.map((p) => p.output),
+      destinations: to.map((p) => p.output),
+      weights,
+      distances,
+      algorithm: algorithm.name,
     };
   }
 
-  /** Cheap reject: can the source's reachable nodes and the target's feeding nodes share a component? */
-  private mayConnect(source: number, target: number): boolean {
-    const q = this.query;
-    const N = this.graph.nodes.count;
-    const component = this.graph.nodes.component;
-    const from: number[] = [];
-    const to: number[] = [];
-    if (source < N) from.push(component[source]);
-    if (target < N) to.push(component[target]);
-    for (let k = 0; k < q.overlayCount; k++) {
-      const a = q.overlayFrom[k];
-      const b = q.overlayTo[k];
-      if (a === source && b === target) return true;
-      if (a === source && b < N) from.push(component[b]);
-      if (b === target && a < N) to.push(component[a]);
+  private snapMany(
+    points: readonly WaypointInput[],
+    options: ManyOptions,
+    algorithm: string,
+  ): SnappedPoint[] | RouteFailure {
+    const snapOptions: SnapOptions = { ...this.defaultSnap, ...options.snap };
+    const routeSnap = resolveSnap(snapOptions);
+    const ctx = this.context(this.algorithms.resolve(algorithm), options.budget);
+    const out: SnappedPoint[] = [];
+    for (let i = 0; i < points.length; i++) {
+      const p = readWaypoint(points[i]);
+      if (!p) {
+        return {
+          ok: false,
+          reason: 'INVALID_INPUT',
+          message: `Point #${i} is not a position, Point or Point feature.`,
+          waypointIndex: i,
+          algorithm,
+        };
+      }
+      out.push(
+        snapPoint(ctx, {
+          input: p.position,
+          snap: p.snap ? resolveSnap(snapOptions, p.snap) : routeSnap,
+          context: { index: i, input: p.position, role: i === 0 ? 'origin' : 'destination' },
+        }),
+      );
     }
-    return from.some((c) => to.includes(c));
+    return out;
   }
 
-  private heuristicTo(targetPoint: Position): Heuristic | null {
+  private context(algorithm: PathAlgorithm, budget: SearchBudget | undefined): RouteContext<P> {
+    const { maxCost, maxSettled } = resolveBudget(budget);
+    return {
+      graph: this.graph,
+      query: this.query,
+      scratch: this.scratch,
+      algorithm,
+      heuristicFor: (goals, origins) => this.heuristicFor(goals, origins),
+      maxCost,
+      maxSettled,
+    };
+  }
+
+  /** Geometric bound, strengthened by landmarks when the finder has them. */
+  private heuristicFor(goals: readonly SnapCandidate[], origins: readonly SnapCandidate[]): Heuristic | null {
+    if (goals.length === 0) return null;
+    const geometric = this.geometricHeuristic(goals.map((g) => g.point));
+    if (!this.landmarks || this.landmarks.count === 0) return geometric;
+    return landmarkHeuristic(this.graph as RoutingGraph<unknown>, this.landmarks, goals, origins, geometric);
+  }
+
+  /** Admissible, consistent bound to the nearest of `points` (virtual nodes get 0). */
+  private geometricHeuristic(points: readonly Position[]): Heuristic | null {
     const { dims, scale } = this.graph.heuristic;
-    if (!(scale > 0)) return null;
+    if (!(scale > 0) || points.length === 0) return null;
     const N = this.graph.nodes.count;
     const emb = this.graph.nodes.embedding;
-    const t = new Float64Array(dims);
-    this.graph.metric.embed!(targetPoint[0], targetPoint[1], t, 0);
-    // Virtual nodes get 0, which is trivially admissible.
-    if (dims === 3) {
+    const T = points.length;
+    const t = new Float64Array(dims * T);
+    for (let i = 0; i < T; i++) this.graph.metric.embed!(points[i][0], points[i][1], t, i * dims);
+    if (T === 1 && dims === 3) {
       const tx = t[0];
       const ty = t[1];
       const tz = t[2];
@@ -329,7 +434,7 @@ export class LineFinder<P = unknown> {
         return scale * Math.sqrt(dx * dx + dy * dy + dz * dz);
       };
     }
-    if (dims === 2) {
+    if (T === 1 && dims === 2) {
       const tx = t[0];
       const ty = t[1];
       return (node) => {
@@ -341,12 +446,16 @@ export class LineFinder<P = unknown> {
     }
     return (node) => {
       if (node >= N) return 0;
-      let sum = 0;
-      for (let d = 0, o = node * dims; d < dims; d++) {
-        const diff = emb[o + d] - t[d];
-        sum += diff * diff;
+      let best = Infinity;
+      for (let i = 0; i < T; i++) {
+        let sum = 0;
+        for (let d = 0, o = node * dims, p = i * dims; d < dims; d++) {
+          const diff = emb[o + d] - t[p + d];
+          sum += diff * diff;
+        }
+        if (sum < best) best = sum;
       }
-      return scale * Math.sqrt(sum);
+      return scale * Math.sqrt(best);
     };
   }
 }

@@ -1,35 +1,76 @@
 export { LineFinder } from './route/finder';
 export type {
+  CandidateOptions,
+  CandidateReport,
+  CandidateStatus,
+  ConnectorMode,
+  FailurePolicy,
   LineFinderOptions,
+  ManyOptions,
+  ManyResult,
+  MatrixResult,
   NearestResult,
   RouteFailure,
+  RouteFailureDetail,
   RouteFailureReason,
   RouteLeg,
   RouteOptions,
   RouteResult,
   RouteSuccess,
+  SearchBudget,
+  SkippedWaypoint,
   SnappedWaypoint,
+  WaypointAccess,
 } from './route/finder';
-export type { RouteSection } from './route/assemble';
+export type { RouteSection, SectionsDetail } from './route/assemble';
 export { toLineString, type RouteSummary } from './route/geojson';
 
-export { buildGraph, type GraphOptions } from './graph/build';
+export { buildGraph, type GraphOptions, type GraphSettings } from './graph/build';
 export { RoutingGraph } from './graph/graph';
 export type {
   ChainTable,
   ComponentTable,
+  DiagnosticsLog,
   EdgeTable,
   GraphStats,
+  NodeChainTable,
   NodeTable,
+  ReverseEdgeTable,
   SegmentTable,
   VertexTable,
 } from './graph/graph';
+export type { StrongComponents } from './graph/scc';
+export type { GroupFunction, GroupKey } from './graph/topology';
+
+export type {
+  ComponentReport,
+  DangleReport,
+  DiagnosticList,
+  DiagnosticsOptions,
+  GraphDiagnostics,
+  InvalidCoordinateReport,
+  OverlapReport,
+  RepairReport,
+} from './graph/diagnostics';
+export { GRAPH_FORMAT, GRAPH_FORMAT_VERSION } from './graph/serialize';
+export type { DeserializeOptions, GraphHeader, SerializeOptions, TransferableGraph } from './graph/serialize';
 
 export { AlgorithmRegistry, builtinAlgorithms, createAlgorithmRegistry } from './algorithm/registry';
 export { astar } from './algorithm/astar';
 export { dijkstra } from './algorithm/dijkstra';
+export { bidirectionalDijkstra } from './algorithm/bidirectional';
+export { LandmarkTable, prepareLandmarks } from './algorithm/landmarks';
+export type { LandmarkOptions, LandmarkStrategy, TransferableLandmarks } from './algorithm/landmarks';
 export { SearchScratch, reconstructPath } from './algorithm/scratch';
-export type { Heuristic, PathAlgorithm, SearchGraph, SearchRequest, SearchResult } from './algorithm/types';
+export type {
+  AlgorithmCapabilities,
+  Heuristic,
+  PathAlgorithm,
+  SearchGraph,
+  SearchRequest,
+  SearchResult,
+  TargetPath,
+} from './algorithm/types';
 
 export { FourAryHeap } from './heap/four-ary-heap';
 export type { Heap, HeapConstructor } from './heap/heap';
@@ -58,9 +99,24 @@ export type {
   WeightContext,
   WeightFunction,
   WeightResult,
+  ZeroWeight,
 } from './weight/weight';
 
-export type { SnapConnectivity, SnapMode, SnapOptions } from './snap/snap';
+export type {
+  CandidateCost,
+  CandidateDistinct,
+  CandidateFilter,
+  CandidateInfo,
+  CandidateSide,
+  SnapConnectivity,
+  SnapCostMode,
+  SnapMode,
+  SnapOptions,
+  SnapSelection,
+  WaypointContext,
+  WaypointRole,
+  WaypointSnapOptions,
+} from './snap/snap';
 
 export type {
   GeometryLike,
@@ -71,4 +127,5 @@ export type {
   PointGeometry,
   Position,
   WaypointInput,
+  WaypointObject,
 } from './types';
