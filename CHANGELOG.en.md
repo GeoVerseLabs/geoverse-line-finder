@@ -4,6 +4,27 @@
 
 This project follows [Semantic Versioning](https://semver.org/); while in 0.x, minor versions may contain breaking changes.
 
+## Unreleased
+
+With default options (no `group`) the output is still bit-identical to 0.1.0 (golden tests unchanged). The changes below only affect connectivity groups and snap constraints.
+
+### Fixed
+
+- **`snap.group` crowded out by other floors**: the group constraint used to filter after scanning, and the other floors it filtered out counted towards `searchLimit` (default 64). When the target floor's corridors were farther away than those of other floors (dense podium, sparse tower), three floors were enough for a false `SNAP_FAILED` / `FILTERED`. A group-constrained snap now scans only that group's segments / vertices / nodes (per-group R-trees, built lazily), and returns what a full scan with the same constraint and no scan limit would (checked by a randomised comparison test).
+- **Connector interiors counted as the start floor**: the steps and landings of a staircase used to belong to the start group, so they merged with start-floor vertices at the same coordinate (the floor could shortcut into the middle of the stairs), were joined to the start floor by `splitIntersections` / `snapDangles`, short-circuited switchbacks where they overlap in plan, and start-floor waypoints could snap onto the middle of the stairs. Interior coordinates now **belong to no group**: they are not merged or repaired, and no `group` constraint accepts them; the inside of a segment whose ends lie in different groups belongs to no group either.
+
+### Added
+
+- Snap failure detail `detail: 'SCAN_LIMIT'`: the `searchLimit` nearest locations were all excluded by constraints and allowed ones may lie farther away (previously reported as `FILTERED`) — raise `searchLimit`.
+- `graph.vertexGroup()` / `segmentGroup()` / `groupSpatialIndex()`.
+
+### Changed
+
+- The interior coordinates of connectors can no longer be snapped to with `mode: 'exact'`, and `graph.findVertex()` does not find them.
+- Candidate `group`: `undefined` on a staircase (an interior coordinate, or inside a segment between groups); it used to take one end's group depending on the chain direction.
+- Topology diagnostics: connectors are no longer reported as collinear overlaps (stairs stacked floor above floor are drawn that way); near misses of dead ends only consider segments lying entirely in their group, matching the `snapDangles` repair.
+- Size: +0.7 KB gzip (per-group indexes, scan truncation), still within the gate.
+
 ## 0.2.0 — 2026-09-14
 
 With default options the output is bit-identical to 0.1.0 (pinned by golden-output tests); the few behaviour changes and upgrade advice are in [docs/UPGRADING.en.md](docs/UPGRADING.en.md).

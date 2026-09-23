@@ -39,7 +39,10 @@ declare class VertexStore {
     getOrAdd(position: Position, group?: number): number;
     /** Looks a coordinate up without inserting; `-1` when no vertex of `group` matches. */
     find(px: number, py: number, group?: number): number;
-    /** Adds a vertex unconditionally (used for split points computed during connectivity repair). */
+    /**
+     * Adds a vertex unconditionally (split points computed during connectivity repair). A {@link NO_GROUP}
+     * vertex is not indexed, so {@link find} never returns it and nothing merges into it.
+     */
     append(px: number, py: number, position: Position, group?: number): number;
 }
 
@@ -47,8 +50,10 @@ declare class VertexStore {
 type GroupKey = string | number;
 /**
  * Assigns a feature to a connectivity group (`null`/`undefined` = the default group), or to two groups as a
- * connector: `[startGroup, endGroup]` puts the last coordinate of every part into `endGroup` and all other
- * coordinates into `startGroup` — an elevator is a zero-length line whose two ends are in different floors.
+ * connector: `[startGroup, endGroup]` puts the first coordinate of every part into `startGroup` and the last
+ * into `endGroup` — an elevator is a zero-length line whose two ends are in different floors. The interior
+ * coordinates of a connector (the steps of a staircase) belong to no group: they are never merged with
+ * other vertices, repaired, or matched by a `group` constraint.
  */
 type GroupFunction<P = unknown> = (properties: P, featureIndex: number, feature: NetworkFeature<P>) => GroupKey | readonly [GroupKey, GroupKey] | null | undefined;
 /** Column-wise repair log (see `graph/diagnostics.ts`). */
@@ -96,6 +101,10 @@ interface CandidateInfo<P = unknown> {
     /** Measure along that feature (metric length from the start of its part). */
     readonly measure: number;
     readonly component: number;
+    /**
+     * Connectivity group of the location; `undefined` in the default group and on connectors between groups
+     * (a location on a staircase belongs to no floor, so no `group` constraint matches it).
+     */
     readonly group: GroupKey | undefined;
     /** Position among the accepted candidates of this waypoint, nearest first. */
     readonly rank: number;
@@ -552,7 +561,10 @@ interface VertexTable {
     readonly chain: Int32Array;
     /** Vertex index within its chain (interior vertices only). */
     readonly chainPos: Int32Array;
-    /** Group index per vertex (see {@link RoutingGraph.groupKeys}); `null` when the graph has one group. */
+    /**
+     * Group index per vertex (see {@link RoutingGraph.groupKeys}), `-1` for the interior of connector features;
+     * `null` when the graph has one group.
+     */
     readonly group: Int32Array | null;
 }
 interface NodeTable {
@@ -692,6 +704,7 @@ declare class RoutingGraph<P = unknown> {
     readonly remap: Int32Array;
     private vertexTree;
     private nodeTree;
+    private groupTrees;
     private scc;
     private reverse;
     private incident;
@@ -707,6 +720,13 @@ declare class RoutingGraph<P = unknown> {
     groupIndex(key: GroupKey | undefined): number;
     /** Whether a vertex is part of the routable graph. */
     isLiveVertex(vertex: number): boolean;
+    /** Group index of a vertex: 0 in a single-group graph, `-1` inside a connector. */
+    vertexGroup(vertex: number): number;
+    /**
+     * Group index of the locations strictly inside segment `slot`: the group of both its ends, or
+     * `-1` for a segment of a connector (its ends lie in different groups or in none).
+     */
+    segmentGroup(slot: number): number;
     /**
      * Vertex at (or within `tolerance` of) a coordinate, after connectivity repair; -1 when none. Without
      * `group` every group is searched in order.
@@ -719,6 +739,16 @@ declare class RoutingGraph<P = unknown> {
     };
     /** Lazily built R-tree over graph nodes (for `snap.mode = 'node'`). */
     nodeSpatialIndex(): PackedRTree;
+    /**
+     * Lazily built R-tree over what can hold a location of group index `group`: segments with at least one end
+     * in it, or its live vertices, or its nodes. `items` maps tree items to segment slots, vertex ids or node
+     * ids. A group-constrained snap scans this instead of the whole network, so locations of other groups
+     * (floors stacked on top of each other) neither cost scan budget nor hide the allowed ones.
+     */
+    groupSpatialIndex(kind: 'segment' | 'vertex' | 'node', group: number): {
+        tree: PackedRTree;
+        items: Int32Array;
+    };
     /** Strongly connected components of the directed graph (computed once, lazily). */
     strongComponents(): StrongComponents;
     /** Incoming adjacency (computed once, lazily). */
@@ -1124,6 +1154,11 @@ type RouteFailureDetail =
 'NONE_WITHIN'
 /** Locations existed but the waypoint's constraints (`featureIds`, `filter`, `group`) removed them all. */
  | 'FILTERED'
+/**
+ * The `snap.searchLimit` nearest locations were all removed by the waypoint's constraints; allowed ones may
+ * lie farther away — raise `searchLimit`.
+ */
+ | 'SCAN_LIMIT'
 /** `mode: 'exact'` and the coordinate is not a vertex. */
  | 'NOT_A_VERTEX'
 /** A shared component exists but only beyond `snap.maxRelocation`. */

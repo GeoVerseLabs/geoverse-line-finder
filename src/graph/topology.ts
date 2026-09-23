@@ -7,7 +7,7 @@ import {
 } from '../geo/segment';
 import { PackedRTree } from '../spatial/rtree';
 import type { GeometryLike, NetworkCollection, NetworkFeature, Position } from '../types';
-import { VertexStore } from './vertex-store';
+import { NO_GROUP, VertexStore } from './vertex-store';
 
 export interface NetworkScan {
   coordinates: number;
@@ -60,8 +60,10 @@ export type GroupKey = string | number;
 
 /**
  * Assigns a feature to a connectivity group (`null`/`undefined` = the default group), or to two groups as a
- * connector: `[startGroup, endGroup]` puts the last coordinate of every part into `endGroup` and all other
- * coordinates into `startGroup` — an elevator is a zero-length line whose two ends are in different floors.
+ * connector: `[startGroup, endGroup]` puts the first coordinate of every part into `startGroup` and the last
+ * into `endGroup` — an elevator is a zero-length line whose two ends are in different floors. The interior
+ * coordinates of a connector (the steps of a staircase) belong to no group: they are never merged with
+ * other vertices, repaired, or matched by a `group` constraint.
  */
 export type GroupFunction<P = unknown> = (
   properties: P,
@@ -184,11 +186,14 @@ export function buildTopology(
         startGroup = endGroup = groupOf(g as GroupKey | null | undefined);
       }
     }
+    const connector = startGroup !== endGroup;
     for (let pi = 0; pi < parts.length; pi++) {
       const part = parts[pi];
       if (!Array.isArray(part)) continue;
+      let firstValid = -1;
       let lastValid = -1;
-      if (startGroup !== endGroup) {
+      if (connector) {
+        firstValid = part.findIndex(isPosition);
         for (let ci = part.length - 1; ci >= 0; ci--) {
           if (isPosition(part[ci])) {
             lastValid = ci;
@@ -214,6 +219,24 @@ export function buildTopology(
           );
         }
         coordinates++;
+        if (connector && ci !== firstValid && ci !== lastValid) {
+          // Interior of a connector: a vertex of its own (only a repeated coordinate reuses the previous one),
+          // so a staircase neither merges with the floor it passes over nor folds onto its own flights.
+          const id =
+            prev !== -1 && c[0] === prevPos![0] && c[1] === prevPos![1]
+              ? prev
+              : store.append(c[0], c[1], c, NO_GROUP);
+          if (repairs && id !== prev) vertexFeature.push(fi);
+          if (prev !== -1 && id !== prev) {
+            segA.push(prev);
+            segB.push(id);
+            segF.push(fi);
+            segP.push(pi);
+          }
+          prev = id;
+          prevPos = c;
+          continue;
+        }
         const before = store.size;
         const id = store.getOrAdd(c, ci === lastValid ? endGroup : startGroup);
         if (repairs) {
@@ -282,7 +305,8 @@ const PARAM_EPS = 1e-9;
 /**
  * Topology repair on the raw segment soup. Merges are recorded in a union-find and splits as
  * `(t, vertex)` requests per segment; both are applied at once by {@link apply}, so every detection
- * pass works on the original, stable segment ids. Repairs never connect different groups.
+ * pass works on the original, stable segment ids. Repairs never connect different groups, and never touch
+ * the group-less interior of connectors.
  */
 class ConnectivityRepair {
   private readonly parent: number[] = [];
@@ -384,6 +408,7 @@ class ConnectivityRepair {
       if (degree[v] !== 1 || this.find(v) !== v) continue;
       const u = neighbour[v];
       const gv = G[v];
+      if (gv === NO_GROUP) continue; // a connector broken inside (invalid coordinate) is not repaired
       const px = X[v];
       const py = Y[v];
       const { sx, sy } = localScale(metric, py);
@@ -455,7 +480,8 @@ class ConnectivityRepair {
       const a1 = this.find(segA[i]);
       const a2 = this.find(segB[i]);
       if (a1 === a2) continue;
-      if (grouped && G[a1] !== G[a2]) continue;
+      // Connectors (segments between groups, and their group-less interior) are never noded.
+      if (grouped && (G[a1] !== G[a2] || G[a1] === NO_GROUP)) continue;
       const x1 = X[a1];
       const y1 = Y[a1];
       const x2 = X[a2];

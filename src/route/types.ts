@@ -159,6 +159,11 @@ export type RouteFailureDetail =
   | 'NONE_WITHIN'
   /** Locations existed but the waypoint's constraints (`featureIds`, `filter`, `group`) removed them all. */
   | 'FILTERED'
+  /**
+   * The `snap.searchLimit` nearest locations were all removed by the waypoint's constraints; allowed ones may
+   * lie farther away — raise `searchLimit`.
+   */
+  | 'SCAN_LIMIT'
   /** `mode: 'exact'` and the coordinate is not a vertex. */
   | 'NOT_A_VERTEX'
   /** A shared component exists but only beyond `snap.maxRelocation`. */

@@ -120,17 +120,17 @@ A\* 的启发式对**任意**权重都可采纳（度量嵌入 × 全网最小"�
 
 `new LineFinder(network, options)` / `buildGraph(network, options)`：
 
-| 选项                 | 默认           | 说明                                                                                       |
-| -------------------- | -------------- | ------------------------------------------------------------------------------------------ |
-| `metric`             | `'haversine'`  | `'haversine'`（经纬度，米）、`'cheap-ruler'`、`'euclidean'`（投影坐标）或自定义            |
-| `tolerance`          | `0`            | 相距不超过该距离的顶点合并为一个（按真实距离判断；geojson-path-finder 默认 1e-5° ≈ 1.1 m） |
-| `snapDangles`        | `0`            | 把悬挂端点接到该距离内最近的线段上                                                         |
-| `splitIntersections` | `false`        | 在未共点的交叉/接触处打断（会把立交也接上：用 `group` 分开）                               |
-| `compact`            | `true`         | 度 2 顶点压缩成链，结果不变、搜索更快                                                      |
-| `group`              | —              | 连通分组（楼层、立交层）：合并、修复与吸附都不跨组，连接要素返回 `[起点组, 终点组]`        |
-| `zeroWeight`         | `'impassable'` | 权重 `0` 的含义；`'free'` 让电梯这类零长度连接边零代价可通行                               |
-| `diagnostics`        | `false`        | 记录修复与非法坐标，供 `graph.diagnostics()` 定位                                          |
-| `landmarks`          | —              | ALT 地标（`LineFinder` 专有），见上节                                                      |
+| 选项                 | 默认           | 说明                                                                                              |
+| -------------------- | -------------- | ------------------------------------------------------------------------------------------------- |
+| `metric`             | `'haversine'`  | `'haversine'`（经纬度，米）、`'cheap-ruler'`、`'euclidean'`（投影坐标）或自定义                   |
+| `tolerance`          | `0`            | 相距不超过该距离的顶点合并为一个（按真实距离判断；geojson-path-finder 默认 1e-5° ≈ 1.1 m）        |
+| `snapDangles`        | `0`            | 把悬挂端点接到该距离内最近的线段上                                                                |
+| `splitIntersections` | `false`        | 在未共点的交叉/接触处打断（会把立交也接上：用 `group` 分开）                                      |
+| `compact`            | `true`         | 度 2 顶点压缩成链，结果不变、搜索更快                                                             |
+| `group`              | —              | 连通分组（楼层、立交层）：合并、修复与吸附都不跨组，连接要素返回 `[起点组, 终点组]`（见分层一节） |
+| `zeroWeight`         | `'impassable'` | 权重 `0` 的含义；`'free'` 让电梯这类零长度连接边零代价可通行                                      |
+| `diagnostics`        | `false`        | 记录修复与非法坐标，供 `graph.diagnostics()` 定位                                                 |
+| `landmarks`          | —              | ALT 地标（`LineFinder` 专有），见上节                                                             |
 
 地理度量下，坐标超出 `[-180, 180] × [-90, 90]`（多半是误传了投影坐标）或线段跨越 ±180° 经线时，建图直接抛 `RangeError`，不再静默算出错误距离。
 
@@ -147,13 +147,13 @@ A\* 的启发式对**任意**权重都可采纳（度量嵌入 × 全网最小"�
 | `distinctBy`    | `'chain'`           | 候选去重粒度：每条链上每个来源要素 / 每个要素 / 每个连通分量各留最近的一个                                     |
 | `featureIds`    | —                   | 只允许接入这些要素（按 `feature.id` 或 `properties.id`）；路口候选只要有一条关联要素在列表里就算允许           |
 | `filter`        | —                   | `(candidate, context) => boolean`，返回 `false` 即排除                                                         |
-| `group`         | —                   | 只接入该连通分组                                                                                               |
+| `group`         | —                   | 只接入该连通分组；只扫描该组的线段/顶点，别的楼层再密也不占用 `searchLimit`                                    |
 | `cost`          | `1`                 | 吸附代价：数字是吸附距离的系数，函数直接返回代价（与权重同单位）                                               |
 | `costMode`      | `'none'`            | 哪些吸附代价计入：`'ends'` 起点离开 + 终点到达；`'arrive-depart'` 另加每个途经点的到达与离开                   |
 | `maxRelocation` | `Infinity`          | 选中的位置比最近允许位置远出的上限                                                                             |
 | `passThrough`   | `false`             | 途经点可以从一个候选进、另一个候选出（`optimal`，适合两侧都能进出的地堆位）                                    |
 | `connectivity`  | `'connected'`       | 仅 `nearest`：最近位置分属不连通分量时移到共同的弱连通分量；`'reachable'` 要求同一强连通分量；`'nearest'` 不移 |
-| `searchLimit`   | `64`                | 每个途经点最多检查的索引项（被约束过滤掉的也计数）                                                             |
+| `searchLimit`   | `64`                | 每个途经点最多检查的索引项（被约束过滤掉的也计数）；扫满仍无允许位置时报 `detail: 'SCAN_LIMIT'`，应调大它      |
 
 **约束与偏好要分开**：`featureIds` / `filter` / `group` 是"能不能接入"的硬约束；"更愿意走哪条"应当写进权重或 `cost`，不要用 `filter` 表达偏好。每个途经点可以单独给选项，覆盖整条路线的设置：
 
@@ -280,6 +280,8 @@ finder.route([
   { coordinates: b, snap: { group: 'F3' } },
 ]);
 ```
+
+连接要素只有首尾坐标属于楼层（首坐标进起点组、末坐标进终点组）；中间坐标（楼梯的踏步、折返平台）**不属于任何组**：不与楼层上的顶点合并、不参与修复，也不会被带 `group` 约束的途经点吸附上去。所以楼梯要在首尾两端接上楼层——端点与楼层顶点坐标一致，或靠 `tolerance` / `snapDangles` 在同层内接上。
 
 ## Worker 与序列化
 

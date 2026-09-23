@@ -1,5 +1,12 @@
 import type { RoutingGraph } from '../graph/graph';
-import type { Candidate, CandidateInfo, SnapCostMode, WaypointContext } from '../snap/snap';
+import type {
+  Candidate,
+  CandidateInfo,
+  CandidateSet,
+  SnapCostMode,
+  SnapMode,
+  WaypointContext,
+} from '../snap/snap';
 import type { Position } from '../types';
 import { assemblePieces, type ChainPiece, type SectionsDetail } from './assemble';
 import { snapCostOf, type ResolvedSnap } from './options';
@@ -97,10 +104,25 @@ export function planWaypoint(spec: WaypointSpec): PlanWaypoint {
   };
 }
 
-export function snapFailureMessage(index: number, detail: RouteFailureDetail, maxDistance: number): string {
+/** Why a waypoint got no candidate. */
+export function snapFailureDetail(set: CandidateSet, mode: SnapMode): RouteFailureDetail {
+  if (set.truncated && set.filtered > 0) return 'SCAN_LIMIT';
+  if (set.filtered > 0 || set.otherGroups) return 'FILTERED';
+  return mode === 'exact' ? 'NOT_A_VERTEX' : 'NONE_WITHIN';
+}
+
+export function snapFailureMessage(
+  index: number,
+  detail: RouteFailureDetail,
+  maxDistance: number,
+  searchLimit: number,
+): string {
   if (detail === 'NOT_A_VERTEX') return `Waypoint #${index} is not a vertex of the network.`;
   if (detail === 'FILTERED') {
     return `Every network location near waypoint #${index} was removed by its snap constraints (featureIds, filter or group).`;
+  }
+  if (detail === 'SCAN_LIMIT') {
+    return `The ${searchLimit} nearest locations of waypoint #${index} fail its snap constraints; raise snap.searchLimit.`;
   }
   const where = maxDistance === Infinity ? '' : ` within ${maxDistance}`;
   return `No network location found for waypoint #${index}${where}.`;

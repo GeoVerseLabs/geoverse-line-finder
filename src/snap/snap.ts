@@ -41,6 +41,10 @@ export interface CandidateInfo<P = unknown> {
   /** Measure along that feature (metric length from the start of its part). */
   readonly measure: number;
   readonly component: number;
+  /**
+   * Connectivity group of the location; `undefined` in the default group and on connectors between groups
+   * (a location on a staircase belongs to no floor, so no `group` constraint matches it).
+   */
   readonly group: GroupKey | undefined;
   /** Position among the accepted candidates of this waypoint, nearest first. */
   readonly rank: number;
@@ -181,10 +185,10 @@ function buildInfo(
   let chain = hit.chain;
   let position = hit.position;
   let features: number[];
-  let groupVertex: number;
+  let group: number;
   if (hit.anchor.kind === 'node') {
     const node = hit.anchor.node;
-    groupVertex = graph.nodes.vertex[node];
+    group = graph.vertexGroup(graph.nodes.vertex[node]);
     features = graph.nodeFeatures(node);
     if (chain < 0) {
       const incident = graph.nodeChains();
@@ -197,7 +201,8 @@ function buildInfo(
   } else {
     const base = chains.segStart[chain];
     const i = Math.floor(position);
-    groupVertex = chains.vertices[base + chain + i];
+    group =
+      i === position ? graph.vertexGroup(chains.vertices[base + chain + i]) : graph.segmentGroup(base + i);
     features =
       i === position
         ? [...new Set([segments.feature[base + i - 1], segments.feature[base + i]])]
@@ -237,7 +242,7 @@ function buildInfo(
     side,
     measure,
     component: anchorComponent(graph, hit.anchor),
-    group: vertices.group ? graph.groupKeys[vertices.group[groupVertex]] : undefined,
+    group: group >= 0 ? graph.groupKeys[group] : undefined,
     rank: 0,
   };
 }
@@ -289,7 +294,10 @@ export interface CandidateSearch {
   distinct: CandidateDistinct | 'strong';
   /** Hard constraints; `null` accepts everything. */
   accept: ((info: CandidateInfo) => boolean) | null;
-  /** Exact mode: restrict the vertex lookup to this group. */
+  /**
+   * The group constraint (also part of `accept`). It selects what is scanned: only the segments, vertices or
+   * nodes of this group ({@link RoutingGraph.groupSpatialIndex}), and in exact mode the vertex lookup.
+   */
   group?: GroupKey;
   /** Receives rejected candidates (debugging). */
   rejected?: CandidateInfo[];
@@ -300,11 +308,16 @@ export interface CandidateSet {
   list: Candidate[];
   /** Candidates removed by `accept`. */
   filtered: number;
+  /** The scan stopped at `searchLimit` before `limit` candidates were accepted: farther ones were not examined. */
+  truncated: boolean;
+  /** Nothing of the constrained group was within reach, but locations of other groups were. */
+  otherGroups: boolean;
 }
 
 /**
  * Nearest snap locations for one point, in ascending distance, keeping one per `distinct` key among the
- * accepted ones, until `limit` were accepted or `searchLimit` index items were examined.
+ * accepted ones, until `limit` were accepted or `searchLimit` index items were examined. With a `group`
+ * constraint only that group's part of the network is scanned.
  */
 export function searchCandidates(
   graph: RoutingGraph<unknown>,
@@ -317,6 +330,9 @@ export function searchCandidates(
   const keys = new Set<number>();
   let scanned = 0;
   let filtered = 0;
+  let truncated = false;
+  // An unknown group key scans everything (and rejects everything), as the constraint alone would.
+  const groupIndex = s.group !== undefined && graph.vertices.group ? graph.groupIndex(s.group) : -1;
   const offer = (hit: Hit): boolean => {
     scanned++;
     const distance = graph.metric.distance(input, hit.point);
@@ -356,7 +372,12 @@ export function searchCandidates(
         }
       }
     }
-    return list.length < s.limit && scanned < s.searchLimit;
+    if (list.length >= s.limit) return false;
+    if (scanned >= s.searchLimit) {
+      truncated = true;
+      return false;
+    }
+    return true;
   };
   // Tree distances are in a local equirectangular plane; leave a little slack before the exact check.
   const bound = s.maxDistance === Infinity ? Infinity : s.maxDistance * 1.05 + 1e-9;
@@ -388,86 +409,116 @@ export function searchCandidates(
     };
   };
 
-  switch (s.mode) {
-    case 'exact': {
-      const v = graph.findVertex(x, y, s.group);
-      if (v !== -1 && graph.isLiveVertex(v)) offer(vertexHit(v));
-      break;
+  /** Visits the hits of the chosen index in ascending distance while `visit` returns `true`. */
+  const scan = (restrict: boolean, visit: (hit: Hit) => boolean): void => {
+    switch (s.mode) {
+      case 'exact': {
+        const v = graph.findVertex(x, y, s.group);
+        if (v !== -1 && graph.isLiveVertex(v)) visit(vertexHit(v));
+        break;
+      }
+      case 'edge': {
+        const sub = restrict ? graph.groupSpatialIndex('segment', groupIndex) : null;
+        const tree = sub ? sub.tree : graph.segmentIndex;
+        const items = sub ? sub.items : null;
+        const proj: SegmentProjection = { t: 0, x: 0, y: 0 };
+        const segChain = graph.segments.chain;
+        const feature = graph.segments.feature;
+        const { vertices: cv, segStart } = graph.chains;
+        tree.nearest(
+          x,
+          y,
+          sx,
+          sy,
+          (i) => {
+            const k = items ? items[i] : i;
+            const c = segChain[k];
+            const a = cv[k + c];
+            const b = cv[k + c + 1];
+            return projectToSegment(x, y, X[a], Y[a], X[b], Y[b], sx, sy, proj);
+          },
+          (i) => {
+            const k = items ? items[i] : i;
+            const c = segChain[k];
+            const a = cv[k + c];
+            const b = cv[k + c + 1];
+            projectToSegment(x, y, X[a], Y[a], X[b], Y[b], sx, sy, proj);
+            const position = k - segStart[c] + proj.t;
+            return visit({
+              anchor: anchorAt(graph, c, position),
+              point: graph.pointAt(c, position),
+              featureIndex: feature[k],
+              chain: c,
+              position,
+              slot: k,
+            });
+          },
+          bound,
+        );
+        break;
+      }
+      case 'vertex': {
+        const { tree, items } = restrict
+          ? graph.groupSpatialIndex('vertex', groupIndex)
+          : graph.vertexSpatialIndex();
+        tree.nearest(
+          x,
+          y,
+          sx,
+          sy,
+          (i) => Math.hypot((x - X[items[i]]) * sx, (y - Y[items[i]]) * sy),
+          (i) => visit(vertexHit(items[i])),
+          bound,
+        );
+        break;
+      }
+      case 'node': {
+        const sub = restrict ? graph.groupSpatialIndex('node', groupIndex) : null;
+        const tree = sub ? sub.tree : graph.nodeSpatialIndex();
+        const items = sub ? sub.items : null;
+        const nodeVertex = graph.nodes.vertex;
+        const positions = graph.vertices.positions;
+        tree.nearest(
+          x,
+          y,
+          sx,
+          sy,
+          (i) => {
+            const v = nodeVertex[items ? items[i] : i];
+            return Math.hypot((x - X[v]) * sx, (y - Y[v]) * sy);
+          },
+          (i) => {
+            const n = items ? items[i] : i;
+            return visit({
+              anchor: { kind: 'node', node: n },
+              point: positions[nodeVertex[n]],
+              featureIndex: -1,
+              chain: -1,
+              position: 0,
+              slot: -1,
+            });
+          },
+          bound,
+        );
+        break;
+      }
+      default:
+        throw new RangeError(`Unknown snap mode "${String(s.mode)}".`);
     }
-    case 'edge': {
-      const proj: SegmentProjection = { t: 0, x: 0, y: 0 };
-      const segChain = graph.segments.chain;
-      const feature = graph.segments.feature;
-      const { vertices: cv, segStart } = graph.chains;
-      graph.segmentIndex.nearest(
-        x,
-        y,
-        sx,
-        sy,
-        (k) => {
-          const c = segChain[k];
-          const a = cv[k + c];
-          const b = cv[k + c + 1];
-          return projectToSegment(x, y, X[a], Y[a], X[b], Y[b], sx, sy, proj);
-        },
-        (k) => {
-          const c = segChain[k];
-          const a = cv[k + c];
-          const b = cv[k + c + 1];
-          projectToSegment(x, y, X[a], Y[a], X[b], Y[b], sx, sy, proj);
-          const position = k - segStart[c] + proj.t;
-          return offer({
-            anchor: anchorAt(graph, c, position),
-            point: graph.pointAt(c, position),
-            featureIndex: feature[k],
-            chain: c,
-            position,
-            slot: k,
-          });
-        },
-        bound,
-      );
-      break;
-    }
-    case 'vertex': {
-      const { tree, items } = graph.vertexSpatialIndex();
-      tree.nearest(
-        x,
-        y,
-        sx,
-        sy,
-        (i) => Math.hypot((x - X[items[i]]) * sx, (y - Y[items[i]]) * sy),
-        (i) => offer(vertexHit(items[i])),
-        bound,
-      );
-      break;
-    }
-    case 'node': {
-      const nodeVertex = graph.nodes.vertex;
-      const positions = graph.vertices.positions;
-      graph.nodeSpatialIndex().nearest(
-        x,
-        y,
-        sx,
-        sy,
-        (n) => Math.hypot((x - X[nodeVertex[n]]) * sx, (y - Y[nodeVertex[n]]) * sy),
-        (n) =>
-          offer({
-            anchor: { kind: 'node', node: n },
-            point: positions[nodeVertex[n]],
-            featureIndex: -1,
-            chain: -1,
-            position: 0,
-            slot: -1,
-          }),
-        bound,
-      );
-      break;
-    }
-    default:
-      throw new RangeError(`Unknown snap mode "${String(s.mode)}".`);
+  };
+
+  const restrict = groupIndex >= 0 && s.mode !== 'exact';
+  scan(restrict, offer);
+  // Other groups were not scanned. When the group has nothing within reach, tell "only other floors are
+  // here" (a constraint problem) apart from "nothing is here" with one probe of the whole network.
+  let otherGroups = false;
+  if (restrict && list.length === 0 && filtered === 0) {
+    scan(false, (hit) => {
+      otherGroups = graph.metric.distance(input, hit.point) <= s.maxDistance;
+      return !otherGroups;
+    });
   }
   list.sort((a, b) => a.distance - b.distance);
   for (let i = 0; i < list.length; i++) list[i].rank = i;
-  return { list, filtered };
+  return { list, filtered, truncated, otherGroups };
 }

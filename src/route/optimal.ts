@@ -5,6 +5,7 @@ import {
   applySnapCosts,
   candidateReports,
   planWaypoint,
+  snapFailureDetail,
   snapFailureMessage,
   waypointOutput,
   type Plan,
@@ -101,9 +102,8 @@ export function planOptimal(
       failures.push(null);
       continue;
     }
-    const detail: RouteFailureDetail =
-      set.filtered > 0 ? 'FILTERED' : snap.mode === 'exact' ? 'NOT_A_VERTEX' : 'NONE_WITHIN';
-    const message = snapFailureMessage(i, detail, snap.maxDistance);
+    const detail = snapFailureDetail(set, snap.mode);
+    const message = snapFailureMessage(i, detail, snap.maxDistance, snap.searchLimit);
     if (policy.policy === 'fail' || (policy.policy === 'skip' && i === 0 && !policy.leading)) {
       return { ok: false, reason: 'SNAP_FAILED', message, detail, waypointIndex: i };
     }

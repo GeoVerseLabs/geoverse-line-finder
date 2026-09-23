@@ -3,6 +3,7 @@ import { projectToSegment, type SegmentProjection } from '../geo/segment';
 import type { Position } from '../types';
 import type { RoutingGraph } from './graph';
 import { REPAIR_DANGLE, REPAIR_MERGE, type GroupKey } from './topology';
+import { NO_GROUP } from './vertex-store';
 
 export interface DiagnosticsOptions {
   /** Dead ends at most this far from another segment are near misses (metric units). Default `1`. */
@@ -119,24 +120,27 @@ export function diagnoseGraph(
     const group = groupOf(v);
     const { sx, sy } = localScale(metric, py);
     let nearest = -1;
-    graph.segmentIndex.nearest(
-      px,
-      py,
-      sx,
-      sy,
-      (s) => {
-        const c = segments.chain[s];
-        if (c === own) return Infinity;
-        const a = chains.vertices[s + c];
-        const b = chains.vertices[s + c + 1];
-        if (groupOf(a) !== group) return Infinity;
-        return projectToSegment(px, py, X[a], Y[a], X[b], Y[b], sx, sy, proj);
-      },
-      (s) => {
-        nearest = s;
-        return false;
-      },
-    );
+    // Same rule as the `snapDangles` repair: only segments lying entirely in the dead end's group, and none
+    // for the group-less interior of a connector.
+    if (group !== NO_GROUP)
+      graph.segmentIndex.nearest(
+        px,
+        py,
+        sx,
+        sy,
+        (s) => {
+          const c = segments.chain[s];
+          if (c === own) return Infinity;
+          if (graph.segmentGroup(s) !== group) return Infinity;
+          const a = chains.vertices[s + c];
+          const b = chains.vertices[s + c + 1];
+          return projectToSegment(px, py, X[a], Y[a], X[b], Y[b], sx, sy, proj);
+        },
+        (s) => {
+          nearest = s;
+          return false;
+        },
+      );
     let nearestDistance = Infinity;
     if (nearest >= 0) {
       const c = segments.chain[nearest];
@@ -217,6 +221,9 @@ export function diagnoseGraph(
   const overlaps = new Collector<OverlapReport>(limit);
   const eps = graph.settings.tolerance > 0 ? graph.settings.tolerance : 1e-6;
   for (let s = 0; s < segments.count; s++) {
+    // Connectors run between groups (stacked staircases coincide in plan): they never count as overlaps.
+    const sGroup = graph.segmentGroup(s);
+    if (sGroup === NO_GROUP) continue;
     const c = segments.chain[s];
     const a = chains.vertices[s + c];
     const b = chains.vertices[s + c + 1];
@@ -237,7 +244,7 @@ export function diagnoseGraph(
         const ct = segments.chain[t];
         const p = chains.vertices[t + ct];
         const q = chains.vertices[t + ct + 1];
-        if (groupOf(p) !== groupOf(a)) return;
+        if (graph.segmentGroup(t) !== sGroup) return;
         // Both ends of t within eps of the infinite line through s …
         const off = (vx: number, vy: number) => Math.abs(ux * (vy - Y[a]) * sy - uy * (vx - X[a]) * sx) / len;
         if (off(X[p], Y[p]) > eps || off(X[q], Y[q]) > eps) return;

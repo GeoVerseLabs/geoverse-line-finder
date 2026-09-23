@@ -12,7 +12,7 @@ import {
   type TransferableGraph,
 } from './serialize';
 import type { GroupKey, RepairLog } from './topology';
-import type { VertexStore } from './vertex-store';
+import { NO_GROUP, type VertexStore } from './vertex-store';
 
 export interface GraphStats {
   /** Features in the input collection. */
@@ -64,7 +64,10 @@ export interface VertexTable {
   readonly chain: Int32Array;
   /** Vertex index within its chain (interior vertices only). */
   readonly chainPos: Int32Array;
-  /** Group index per vertex (see {@link RoutingGraph.groupKeys}); `null` when the graph has one group. */
+  /**
+   * Group index per vertex (see {@link RoutingGraph.groupKeys}), `-1` for the interior of connector features;
+   * `null` when the graph has one group.
+   */
   readonly group: Int32Array | null;
 }
 
@@ -208,6 +211,7 @@ export class RoutingGraph<P = unknown> {
   readonly remap: Int32Array;
   private vertexTree: { tree: PackedRTree; items: Int32Array } | null = null;
   private nodeTree: PackedRTree | null = null;
+  private groupTrees: Map<number, { tree: PackedRTree; items: Int32Array }> | null = null;
   private scc: StrongComponents | null = null;
   private reverse: ReverseEdgeTable | null = null;
   private incident: NodeChainTable | null = null;
@@ -281,6 +285,23 @@ export class RoutingGraph<P = unknown> {
     return this.vertices.node[vertex] >= 0 || this.vertices.chain[vertex] >= 0;
   }
 
+  /** Group index of a vertex: 0 in a single-group graph, `-1` inside a connector. */
+  vertexGroup(vertex: number): number {
+    return this.vertices.group ? this.vertices.group[vertex] : 0;
+  }
+
+  /**
+   * Group index of the locations strictly inside segment `slot`: the group of both its ends, or
+   * `-1` for a segment of a connector (its ends lie in different groups or in none).
+   */
+  segmentGroup(slot: number): number {
+    const group = this.vertices.group;
+    if (!group) return 0;
+    const c = this.segments.chain[slot];
+    const a = group[this.chains.vertices[slot + c]];
+    return a === group[this.chains.vertices[slot + c + 1]] ? a : NO_GROUP;
+  }
+
   /**
    * Vertex at (or within `tolerance` of) a coordinate, after connectivity repair; -1 when none. Without
    * `group` every group is searched in order.
@@ -326,6 +347,52 @@ export class RoutingGraph<P = unknown> {
       this.nodeTree = tree;
     }
     return this.nodeTree;
+  }
+
+  /**
+   * Lazily built R-tree over what can hold a location of group index `group`: segments with at least one end
+   * in it, or its live vertices, or its nodes. `items` maps tree items to segment slots, vertex ids or node
+   * ids. A group-constrained snap scans this instead of the whole network, so locations of other groups
+   * (floors stacked on top of each other) neither cost scan budget nor hide the allowed ones.
+   */
+  groupSpatialIndex(
+    kind: 'segment' | 'vertex' | 'node',
+    group: number,
+  ): { tree: PackedRTree; items: Int32Array } {
+    const key = group * 3 + (kind === 'segment' ? 0 : kind === 'vertex' ? 1 : 2);
+    this.groupTrees ??= new Map();
+    let entry = this.groupTrees.get(key);
+    if (entry) return entry;
+    const { x, y } = this.vertices;
+    const cv = this.chains.vertices;
+    const segChain = this.segments.chain;
+    const nodeVertex = this.nodes.vertex;
+    // Item i spans vertices ends(i) = [a, b] (a === b for vertices and nodes).
+    let a = 0;
+    let b = 0;
+    const ends = (i: number): void => {
+      if (kind === 'segment') {
+        a = cv[i + segChain[i]];
+        b = cv[i + segChain[i] + 1];
+      } else a = b = kind === 'vertex' ? i : nodeVertex[i];
+    };
+    const count =
+      kind === 'segment' ? this.segments.count : kind === 'vertex' ? this.vertices.count : this.nodes.count;
+    const items: number[] = [];
+    for (let i = 0; i < count; i++) {
+      ends(i);
+      if (kind === 'vertex' && !this.isLiveVertex(i)) continue;
+      if (this.vertexGroup(a) === group || this.vertexGroup(b) === group) items.push(i);
+    }
+    const tree = new PackedRTree(items.length);
+    for (const i of items) {
+      ends(i);
+      tree.add(Math.min(x[a], x[b]), Math.min(y[a], y[b]), Math.max(x[a], x[b]), Math.max(y[a], y[b]));
+    }
+    tree.finish();
+    entry = { tree, items: Int32Array.from(items) };
+    this.groupTrees.set(key, entry);
+    return entry;
   }
 
   /** Strongly connected components of the directed graph (computed once, lazily). */

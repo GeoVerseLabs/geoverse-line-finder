@@ -148,13 +148,13 @@ Query time (`route(points, { snap })`, or defaults in `new LineFinder(net, { sna
 | `distinctBy`    | `'chain'`            | one candidate per chain and source feature / per feature / per connected component                                                                                         |
 | `featureIds`    | —                    | only these features may be used (by `feature.id` or `properties.id`); a junction qualifies if any feature touching it is listed                                            |
 | `filter`        | —                    | `(candidate, context) => boolean`; `false` removes the candidate                                                                                                           |
-| `group`         | —                    | only locations in this connectivity group                                                                                                                                  |
+| `group`         | —                    | only locations in this connectivity group; only that group's segments / vertices are scanned, so denser floors never use up `searchLimit`                                  |
 | `cost`          | `1`                  | snap cost: a number multiplies the snap distance, a function returns the cost directly (weight units)                                                                      |
 | `costMode`      | `'none'`             | which snap costs count: `'ends'` leaving the origin + reaching the destination; `'arrive-depart'` also reaching and leaving every via                                      |
 | `maxRelocation` | `Infinity`           | how much farther than the nearest allowed location the chosen one may be                                                                                                   |
 | `passThrough`   | `false`              | a via may be entered at one candidate and left at another (`optimal`; floor locations reachable from both sides)                                                           |
 | `connectivity`  | `'connected'`        | `nearest` only: move waypoints into a shared weakly connected component when needed; `'reachable'` requires one strongly connected component; `'nearest'` never moves them |
-| `searchLimit`   | `64`                 | index items examined per waypoint (filtered ones included)                                                                                                                 |
+| `searchLimit`   | `64`                 | index items examined per waypoint (filtered ones included); when they are used up without an allowed location the failure has `detail: 'SCAN_LIMIT'` — raise it            |
 
 **Keep constraints and preferences apart**: `featureIds` / `filter` / `group` are hard constraints on where a waypoint may attach; which way is preferable belongs in the weight or in `cost` — do not express preferences with `filter`. Every waypoint can override the route's options:
 
@@ -281,6 +281,8 @@ finder.route([
   { coordinates: b, snap: { group: 'F3' } },
 ]);
 ```
+
+Only the ends of a connector belong to floors (the first coordinate to the start group, the last to the end group). Its interior coordinates — the steps and landings of a staircase — **belong to no group**: they never merge with floor vertices, take no part in repairs, and a waypoint with a `group` constraint never snaps onto them. So attach both ends of a staircase to its floors: give them the coordinates of floor vertices, or let `tolerance` / `snapDangles` connect them within the floor.
 
 ## Workers and serialisation
 

@@ -15,6 +15,12 @@ type ExactIndex = Map<number, Map<number, number>>;
 type GridIndex = Map<number, Map<number, number[]>>;
 
 /**
+ * Group index of vertices that belong to no connectivity group: the interior coordinates of connector
+ * features (the steps of a staircase between two floors). They are never merged, looked up or repaired.
+ */
+export const NO_GROUP = -1;
+
+/**
  * Deduplicates network coordinates into vertex ids.
  *
  * Exact mode uses a nested `Map<x, Map<y, id>>` (no string keys — the trick that makes terra-route's
@@ -121,13 +127,17 @@ export class VertexStore {
     return best;
   }
 
-  /** Adds a vertex unconditionally (used for split points computed during connectivity repair). */
+  /**
+   * Adds a vertex unconditionally (split points computed during connectivity repair). A {@link NO_GROUP}
+   * vertex is not indexed, so {@link find} never returns it and nothing merges into it.
+   */
   append(px: number, py: number, position: Position, group = 0): number {
     const id = this.x.length;
     this.x.push(px);
     this.y.push(py);
     this.positions.push(position);
     this.group.push(group);
+    if (group < 0) return id;
     if (this.exact) {
       const index = (this.exact[group] ??= new Map());
       let column = index.get(px);
