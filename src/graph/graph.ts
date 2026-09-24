@@ -3,6 +3,7 @@ import { PackedRTree } from '../spatial/rtree';
 import type { NetworkFeature, Position } from '../types';
 import type { GraphSettings } from './build';
 import { diagnoseGraph, type DiagnosticsOptions, type GraphDiagnostics } from './diagnostics';
+import type { LevelTable } from './levels';
 import { strongComponents, type StrongComponents } from './scc';
 import {
   graphFromTransferable,
@@ -50,6 +51,8 @@ export interface GraphStats {
   largestComponentNodes: number;
   /** Connectivity groups (1 unless the `group` option is used). */
   groups: number;
+  /** Features synthesised from `verticalConnectors` (appended after the input collection). */
+  verticalConnectors: number;
 }
 
 export interface VertexTable {
@@ -69,6 +72,11 @@ export interface VertexTable {
    * `null` when the graph has one group.
    */
   readonly group: Int32Array | null;
+  /**
+   * Height of every vertex, from the `levels` elevations and interpolated by length inside a connector;
+   * `NaN` where unknown, `null` when no level carries an elevation.
+   */
+  readonly elevation: Float64Array | null;
 }
 
 export interface NodeTable {
@@ -170,11 +178,13 @@ export interface RoutingGraphParts<P> {
   segments: SegmentTable;
   edges: EdgeTable;
   components: ComponentTable;
-  heuristic: { dims: number; scale: number };
+  heuristic: { dims: number; scale: number; perLevel: number };
   segmentIndex: PackedRTree;
   store: VertexStore;
   remap: Int32Array;
   groupKeys: readonly (GroupKey | undefined)[];
+  levels: LevelTable | null;
+  syntheticFeatures: number;
   settings: GraphSettings;
   diagnosticsLog: DiagnosticsLog | null;
 }
@@ -196,12 +206,19 @@ export class RoutingGraph<P = unknown> {
   readonly segments: SegmentTable;
   readonly edges: EdgeTable;
   readonly components: ComponentTable;
-  /** A* support: embedding dimension and the admissible cost-per-metric-unit scale (0 = unavailable). */
-  readonly heuristic: { readonly dims: number; readonly scale: number };
+  /**
+   * A* support: embedding dimension, the admissible cost-per-metric-unit scale, and `perLevel` — the
+   * cheapest cost of crossing one level over every connector (0 = no level term). All 0 = unavailable.
+   */
+  readonly heuristic: { readonly dims: number; readonly scale: number; readonly perLevel: number };
   /** R-tree over chain segments, used for snapping. */
   readonly segmentIndex: PackedRTree;
   /** Connectivity group keys by index; index 0 is the default group (`undefined`). */
   readonly groupKeys: readonly (GroupKey | undefined)[];
+  /** Level metadata per group, or `null` when the graph was built without `levels`. */
+  readonly levels: LevelTable | null;
+  /** Features at the end of {@link features} that were synthesised from `verticalConnectors`. */
+  readonly syntheticFeatures: number;
   readonly settings: GraphSettings;
   /** @internal */
   readonly diagnosticsLog: DiagnosticsLog | null;
@@ -215,6 +232,7 @@ export class RoutingGraph<P = unknown> {
   private scc: StrongComponents | null = null;
   private reverse: ReverseEdgeTable | null = null;
   private incident: NodeChainTable | null = null;
+  private ordinals: Float64Array | null = null;
 
   constructor(parts: RoutingGraphParts<P>) {
     this.metric = parts.metric;
@@ -232,6 +250,8 @@ export class RoutingGraph<P = unknown> {
     this.store = parts.store;
     this.remap = parts.remap;
     this.groupKeys = parts.groupKeys;
+    this.levels = parts.levels;
+    this.syntheticFeatures = parts.syntheticFeatures;
     this.settings = parts.settings;
     this.diagnosticsLog = parts.diagnosticsLog;
   }
@@ -288,6 +308,49 @@ export class RoutingGraph<P = unknown> {
   /** Group index of a vertex: 0 in a single-group graph, `-1` inside a connector. */
   vertexGroup(vertex: number): number {
     return this.vertices.group ? this.vertices.group[vertex] : 0;
+  }
+
+  /** Storey number of a group index, or `NaN` without levels / for the connector interior (`-1`). */
+  groupOrdinal(group: number): number {
+    return this.levels && group >= 0 ? this.levels.ordinal[group] : NaN;
+  }
+
+  /** Group index of a location on `chain` at fractional `position` (`-1` inside a connector). */
+  levelAt(chain: number, position: number): number {
+    if (!this.vertices.group) return 0;
+    const n = this.segmentCountOf(chain);
+    const i = Math.min(Math.max(Math.floor(position), 0), n - 1);
+    const base = this.chains.segStart[chain];
+    if (position === i) return this.vertexGroup(this.chains.vertices[base + chain + i]);
+    if (position === i + 1) return this.vertexGroup(this.chains.vertices[base + chain + i + 1]);
+    return this.segmentGroup(base + i);
+  }
+
+  /** Height of a location on `chain`, interpolated inside the segment; `NaN` when unknown. */
+  elevationAt(chain: number, position: number): number {
+    const elevation = this.vertices.elevation;
+    if (!elevation) return NaN;
+    const n = this.segmentCountOf(chain);
+    const i = Math.min(Math.max(Math.floor(position), 0), n - 1);
+    const base = this.chains.segStart[chain] + chain;
+    const a = elevation[this.chains.vertices[base + i]];
+    const f = position - i;
+    if (f === 0) return a;
+    const b = elevation[this.chains.vertices[base + i + 1]];
+    return f === 1 ? b : a + (b - a) * f;
+  }
+
+  /** Storey number of every node (computed once, lazily); `NaN` where unknown. */
+  nodeOrdinals(): Float64Array {
+    if (!this.ordinals) {
+      const out = new Float64Array(this.nodes.count).fill(NaN);
+      if (this.levels) {
+        for (let n = 0; n < out.length; n++)
+          out[n] = this.groupOrdinal(this.vertexGroup(this.nodes.vertex[n]));
+      }
+      this.ordinals = out;
+    }
+    return this.ordinals;
   }
 
   /**

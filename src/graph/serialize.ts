@@ -3,11 +3,15 @@ import { PackedRTree } from '../spatial/rtree';
 import type { NetworkFeature, Position } from '../types';
 import type { GraphSettings } from './build';
 import { RoutingGraph, type GraphStats } from './graph';
+import type { LevelTable } from './levels';
 import type { GroupKey, RepairLog } from './topology';
 import { VertexStore } from './vertex-store';
 
 export const GRAPH_FORMAT = 'geoverse-line-finder/graph';
-export const GRAPH_FORMAT_VERSION = 1;
+/** Latest format this build writes. Graphs without `levels` are still written as version 1. */
+export const GRAPH_FORMAT_VERSION = 2;
+/** Every format this build reads. */
+export const GRAPH_FORMAT_VERSIONS: readonly number[] = [1, 2];
 
 type ArrayKind = 'f64' | 'i32' | 'u32' | 'u8';
 type Typed = Float64Array | Int32Array | Uint32Array | Uint8Array;
@@ -26,8 +30,12 @@ export interface GraphHeader {
   featureCount: number;
   stats: GraphStats;
   settings: GraphSettings;
-  heuristic: { dims: number; scale: number };
+  heuristic: { dims: number; scale: number; perLevel: number };
   groupKeys: (GroupKey | null)[];
+  /** Version 2 only: level names and the groups without an ordinal (the arrays travel as buffers). */
+  levels: { name: (string | null)[]; missing: number[]; hasElevation: boolean } | null;
+  /** Version 2 only: the features synthesised from `verticalConnectors`, so a worker gets them back. */
+  synthetic: NetworkFeature<unknown>[] | null;
   largestComponent: number;
   rtree: { numItems: number; nodeSize: number };
   layout: [name: string, kind: ArrayKind, length: number][];
@@ -107,6 +115,11 @@ export function graphToTransferable(
     ['rtree.indices', rtree.indices],
   ];
   if (vertices.group) parts.push(['vertices.group', vertices.group]);
+  const levels = graph.levels;
+  if (levels) {
+    parts.push(['levels.ordinal', levels.ordinal], ['levels.elevation', levels.elevation]);
+    if (vertices.elevation) parts.push(['vertices.elevation', vertices.elevation]);
+  }
   const log = graph.diagnosticsLog;
   if (log) {
     const r = log.repairs;
@@ -127,7 +140,8 @@ export function graphToTransferable(
   }
   return {
     format: GRAPH_FORMAT,
-    formatVersion: GRAPH_FORMAT_VERSION,
+    // Level metadata needs version 2; without it the bytes are exactly what 0.2.0 wrote.
+    formatVersion: levels ? 2 : 1,
     header: {
       metric: { name: graph.metric.name, referenceLat: graph.referenceLat },
       featureCount: graph.features.length,
@@ -135,6 +149,16 @@ export function graphToTransferable(
       settings: { ...graph.settings },
       heuristic: { ...graph.heuristic },
       groupKeys: graph.groupKeys.map((k) => (k === undefined ? null : k)),
+      levels: levels
+        ? {
+            name: levels.name.map((n) => n ?? null),
+            missing: [...levels.missing],
+            hasElevation: levels.hasElevation,
+          }
+        : null,
+      synthetic: graph.syntheticFeatures
+        ? (graph.features.slice(graph.features.length - graph.syntheticFeatures) as NetworkFeature<unknown>[])
+        : null,
       largestComponent: components.largest,
       rtree: { numItems: graph.segmentIndex.numItems, nodeSize: graph.segmentIndex.nodeSize },
       layout,
@@ -150,9 +174,9 @@ export function graphFromTransferable<P = unknown>(
 ): RoutingGraph<P> {
   if (!data || data.format !== GRAPH_FORMAT)
     throw new TypeError('Not a serialised geoverse-line-finder graph.');
-  if (data.formatVersion !== GRAPH_FORMAT_VERSION) {
+  if (!GRAPH_FORMAT_VERSIONS.includes(data.formatVersion)) {
     throw new RangeError(
-      `Unsupported graph format version ${String(data.formatVersion)}; this build reads version ${GRAPH_FORMAT_VERSION}.`,
+      `Unsupported graph format version ${String(data.formatVersion)}; this build reads versions ${GRAPH_FORMAT_VERSIONS.join(', ')}.`,
     );
   }
   const { header, buffers } = data;
@@ -207,11 +231,21 @@ export function graphFromTransferable<P = unknown>(
     store.append(x[v], y[v], p, group ? group[v] : 0);
   }
 
-  const features: readonly NetworkFeature<P>[] =
-    options.features ??
-    Array.from({ length: header.featureCount }, () => ({ geometry: null }) as NetworkFeature<P>);
-  if (features.length !== header.featureCount) {
-    throw new RangeError(`Expected ${header.featureCount} features, got ${features.length}.`);
+  // Synthesised connector features travel in the header, so a worker can pass the input collection alone.
+  const synthetic = (header.synthetic ?? []) as NetworkFeature<P>[];
+  const inputCount = header.featureCount - synthetic.length;
+  let features: readonly NetworkFeature<P>[];
+  if (!options.features) {
+    features = [
+      ...Array.from({ length: inputCount }, () => ({ geometry: null }) as NetworkFeature<P>),
+      ...synthetic,
+    ];
+  } else if (options.features.length === inputCount) {
+    features = synthetic.length ? [...options.features, ...synthetic] : options.features;
+  } else if (options.features.length === header.featureCount) {
+    features = options.features;
+  } else {
+    throw new RangeError(`Expected ${inputCount} features, got ${options.features.length}.`);
   }
 
   let diagnosticsLog = null;
@@ -254,6 +288,7 @@ export function graphFromTransferable<P = unknown>(
       chain: get('vertices.chain'),
       chainPos: get('vertices.chainPos'),
       group,
+      elevation: arrays.has('vertices.elevation') ? get<Float64Array>('vertices.elevation') : null,
     },
     nodes: {
       count: N,
@@ -297,11 +332,26 @@ export function graphFromTransferable<P = unknown>(
       length: get('components.length'),
       largest: header.largestComponent,
     },
-    heuristic: { ...header.heuristic },
+    heuristic: {
+      perLevel: 0,
+      dims: header.heuristic.dims,
+      scale: header.heuristic.scale,
+      ...(header.heuristic.perLevel !== undefined ? { perLevel: header.heuristic.perLevel } : {}),
+    },
     segmentIndex,
     store,
     remap: get('remap'),
     groupKeys: header.groupKeys.map((k) => (k === null ? undefined : k)),
+    levels: header.levels
+      ? ({
+          ordinal: get<Float64Array>('levels.ordinal'),
+          elevation: get<Float64Array>('levels.elevation'),
+          name: header.levels.name.map((n) => n ?? undefined),
+          missing: header.levels.missing,
+          hasElevation: header.levels.hasElevation,
+        } satisfies LevelTable)
+      : null,
+    syntheticFeatures: synthetic.length,
     settings: { ...header.settings },
     diagnosticsLog,
   });

@@ -1,3 +1,4 @@
+import type { GroupKey } from '../graph/topology';
 import type { NetworkFeature, Position } from '../types';
 
 export interface WeightContext<P = unknown> {
@@ -5,6 +6,17 @@ export interface WeightContext<P = unknown> {
   readonly distance: number;
   readonly featureIndex: number;
   readonly feature: NetworkFeature<P>;
+  /**
+   * Connectivity groups of the segment's two ends, in digitised order; `undefined` in the default group
+   * and inside a connector (whose interior coordinates belong to no group).
+   */
+  readonly fromGroup: GroupKey | undefined;
+  readonly toGroup: GroupKey | undefined;
+  /**
+   * Climb along the digitised direction, from the `levels` elevations (interpolated by length inside a
+   * connector). `0` without `levels`, without elevations, or where either end's elevation is unknown.
+   */
+  readonly rise: number;
 }
 
 /** Per-direction costs. A missing or falsy direction is impassable. */

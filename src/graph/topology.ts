@@ -79,6 +79,24 @@ export interface TopologyOptions {
   group?: GroupFunction<unknown>;
   /** Keep a log of repairs and invalid coordinates for `RoutingGraph.diagnostics()`. */
   recordDiagnostics?: boolean;
+  /** Extra segments injected after the network's own (vertical connectors); see {@link SyntheticSegment}. */
+  synthetic?: readonly SyntheticSegment[];
+}
+
+/**
+ * A segment that is not digitised in the network: both ends join (or create) a vertex of their group, and
+ * its costs are taken as given instead of from the weight function.
+ */
+export interface SyntheticSegment {
+  /** Index of the synthesised source feature (past the end of the input collection). */
+  featureIndex: number;
+  part: number;
+  from: Position;
+  fromGroup: GroupKey;
+  to: Position;
+  toGroup: GroupKey;
+  forward: number;
+  backward: number;
 }
 
 export const REPAIR_MERGE = 0;
@@ -108,6 +126,8 @@ export interface Topology {
    * coordinate order (splits in parameter order), which is what measures are accumulated along.
    */
   segPart: Int32Array;
+  /** Index into `options.synthetic` for injected segments, `-1` for segments of the input network. */
+  segSynthetic: Int32Array;
   /** Group keys by index; index 0 is the default group (`undefined`). */
   groupKeys: (GroupKey | undefined)[];
   lineFeatures: number;
@@ -136,6 +156,7 @@ export function buildTopology(
   const segB: number[] = [];
   const segF: number[] = [];
   const segP: number[] = [];
+  const segS: number[] = [];
   let lineFeatures = 0;
   let skippedFeatures = 0;
   let invalidCoordinates = 0;
@@ -232,6 +253,7 @@ export function buildTopology(
             segB.push(id);
             segF.push(fi);
             segP.push(pi);
+            segS.push(-1);
           }
           prev = id;
           prevPos = c;
@@ -250,6 +272,7 @@ export function buildTopology(
           segB.push(id);
           segF.push(fi);
           segP.push(pi);
+          segS.push(-1);
         }
         prev = id;
         prevPos = c;
@@ -257,11 +280,28 @@ export function buildTopology(
     }
   }
 
+  // Vertical connectors: a stop joins the level it serves exactly like a digitised end coordinate, so
+  // merging, `tolerance` and `snapDangles` attach it to the floor network in the usual way.
+  const synthetic = options.synthetic;
+  if (synthetic) {
+    for (let i = 0; i < synthetic.length; i++) {
+      const link = synthetic[i];
+      const a = store.getOrAdd(link.from, groupOf(link.fromGroup));
+      const b = store.getOrAdd(link.to, groupOf(link.toGroup));
+      if (a === b) continue;
+      segA.push(a);
+      segB.push(b);
+      segF.push(link.featureIndex);
+      segP.push(link.part);
+      segS.push(i);
+    }
+  }
+
   const mergedVertices = store.merged;
   const repair = new ConnectivityRepair(store, segA, segB, segF, metric, options.tolerance, repairs);
   const danglesSnapped = options.snapDangles > 0 ? repair.snapDangles(options.snapDangles) : 0;
   const intersectionsSplit = options.splitIntersections ? repair.splitIntersections() : 0;
-  const result = repair.apply(segP);
+  const result = repair.apply(segP, segS);
 
   return {
     store,
@@ -270,6 +310,7 @@ export function buildTopology(
     segB: result.b,
     segFeature: result.f,
     segPart: result.p,
+    segSynthetic: result.s,
     groupKeys,
     lineFeatures,
     skippedFeatures,
@@ -533,11 +574,15 @@ class ConnectivityRepair {
    * Applies merges and splits, returning the final segment arrays. Segments keep their input order and the
    * pieces of a split segment follow its direction, so each feature part stays contiguous and ordered.
    */
-  apply(part: number[]): { a: Int32Array; b: Int32Array; f: Int32Array; p: Int32Array } {
+  apply(
+    part: number[],
+    synthetic: number[],
+  ): { a: Int32Array; b: Int32Array; f: Int32Array; p: Int32Array; s: Int32Array } {
     const outA: number[] = [];
     const outB: number[] = [];
     const outF: number[] = [];
     const outP: number[] = [];
+    const outS: number[] = [];
     const segF = this.segF;
     for (let s = 0; s < this.segA.length; s++) {
       const a = this.find(this.segA[s]);
@@ -549,6 +594,7 @@ class ConnectivityRepair {
           outB.push(b);
           outF.push(segF[s]);
           outP.push(part[s]);
+          outS.push(synthetic[s]);
         }
         continue;
       }
@@ -563,6 +609,7 @@ class ConnectivityRepair {
           outB.push(w);
           outF.push(segF[s]);
           outP.push(part[s]);
+          outS.push(synthetic[s]);
           prev = w;
         }
       }
@@ -571,6 +618,7 @@ class ConnectivityRepair {
         outB.push(b);
         outF.push(segF[s]);
         outP.push(part[s]);
+        outS.push(synthetic[s]);
       }
     }
     return {
@@ -578,6 +626,7 @@ class ConnectivityRepair {
       b: Int32Array.from(outB),
       f: Int32Array.from(outF),
       p: Int32Array.from(outP),
+      s: Int32Array.from(outS),
     };
   }
 

@@ -53,6 +53,28 @@ export interface InvalidCoordinateReport {
   coordinateIndex: number;
 }
 
+/** A connector end that touches nothing else on the level it serves: the lift or stair is not connected. */
+export interface ConnectorEndReport {
+  location: Position;
+  /** The connector feature whose end this is. */
+  featureIndex: number;
+  featureId: string | number | undefined;
+  /** The level the end sits on. */
+  level: GroupKey | undefined;
+}
+
+/** How the levels of a graph reach each other, by weakly connected component. */
+export interface LevelReachability {
+  level: GroupKey | undefined;
+  ordinal: number;
+  /** Weak components holding vertices of this level. */
+  components: number[];
+  /** Levels sharing a component with this one. */
+  connectedTo: (GroupKey | undefined)[];
+  /** No connector touches this level at all. */
+  isolated: boolean;
+}
+
 export interface OverlapReport {
   /** Features of two collinear segments that overlap without being noded. */
   featureIndices: [number, number];
@@ -72,6 +94,18 @@ export interface GraphDiagnostics {
   invalidCoordinates: DiagnosticList<InvalidCoordinateReport> | null;
   /** Collinear overlapping segments, which no repair connects. */
   overlaps: DiagnosticList<OverlapReport>;
+  /**
+   * Connector ends that are not joined to their level - the single most common fault in indoor data.
+   * `null` without `levels`.
+   */
+  connectorEnds: DiagnosticList<ConnectorEndReport> | null;
+  /** Which levels can be reached from which. `null` without `levels`. */
+  levelReachability: LevelReachability[] | null;
+  /**
+   * Levels carrying routable network but no `ordinal`. A single one switches the level-aware A* bound
+   * off for the whole graph, because a passage through it would look free. `null` without `levels`.
+   */
+  missingOrdinals: (GroupKey | undefined)[] | null;
 }
 
 class Collector<T> implements DiagnosticList<T> {
@@ -265,7 +299,78 @@ export function diagnoseGraph(
     );
   }
 
+  // --- levels ------------------------------------------------------------------------------------------
+  let connectorEnds: Collector<ConnectorEndReport> | null = null;
+  let levelReachability: LevelReachability[] | null = null;
+  let missingOrdinals: (GroupKey | undefined)[] | null = null;
+  if (graph.levels) {
+    missingOrdinals = graph.levels.missing.map((g) => graph.groupKeys[g]);
+    // A connector end is "connected" when some non-connector segment of its own level touches it.
+    const onLevel = new Int32Array(vertices.count);
+    for (let slot = 0; slot < segments.count; slot++) {
+      if (graph.segmentGroup(slot) === NO_GROUP) continue;
+      const c = segments.chain[slot];
+      onLevel[chains.vertices[slot + c]]++;
+      onLevel[chains.vertices[slot + c + 1]]++;
+    }
+    connectorEnds = new Collector<ConnectorEndReport>(limit);
+    const seen = new Set<number>();
+    for (let slot = 0; slot < segments.count; slot++) {
+      if (graph.segmentGroup(slot) !== NO_GROUP) continue;
+      const c = segments.chain[slot];
+      for (const v of [chains.vertices[slot + c], chains.vertices[slot + c + 1]]) {
+        const group = groupOf(v);
+        if (group === NO_GROUP || onLevel[v] > 0 || seen.has(v)) continue;
+        seen.add(v);
+        const featureIndex = segments.feature[slot];
+        connectorEnds.push({
+          location: vertices.positions[v],
+          featureIndex,
+          featureId: graph.featureId(featureIndex),
+          level: graph.groupKeys[group],
+        });
+      }
+    }
+    // Levels reach each other exactly when they share a weakly connected component.
+    const G = graph.groupKeys.length;
+    const inComponent: Set<number>[] = Array.from({ length: G }, () => new Set<number>());
+    const mark = (vertex: number, component: number) => {
+      const g = groupOf(vertex);
+      if (g >= 0) inComponent[g].add(component);
+    };
+    for (let n = 0; n < nodes.count; n++) mark(nodes.vertex[n], nodes.component[n]);
+    for (let c = 0; c < chains.count; c++) {
+      const first = chains.segStart[c] + c;
+      const last = chains.segStart[c + 1] + c;
+      for (let i = first + 1; i < last; i++) mark(chains.vertices[i], chains.component[c]);
+    }
+    levelReachability = [];
+    for (let g = 0; g < G; g++) {
+      if (inComponent[g].size === 0) continue;
+      const connectedTo: (GroupKey | undefined)[] = [];
+      for (let h = 0; h < G; h++) {
+        if (h === g || inComponent[h].size === 0) continue;
+        for (const component of inComponent[h]) {
+          if (inComponent[g].has(component)) {
+            connectedTo.push(graph.groupKeys[h]);
+            break;
+          }
+        }
+      }
+      levelReachability.push({
+        level: graph.groupKeys[g],
+        ordinal: graph.groupOrdinal(g),
+        components: [...inComponent[g]].sort((a, b) => a - b),
+        connectedTo,
+        isolated: connectedTo.length === 0,
+      });
+    }
+  }
+
   return {
+    connectorEnds: connectorEnds ? connectorEnds.toJSON() : null,
+    levelReachability,
+    missingOrdinals,
     dangles: dangles.toJSON(),
     nearMisses: nearMisses.toJSON(),
     repairs: repairs ? repairs.toJSON() : null,
