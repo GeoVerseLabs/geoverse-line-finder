@@ -6,8 +6,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
-// Ratchet: set just above the 0.2.0 sizes (27.8 KB / 29.7 KB gzip). Raise only with a reason in the CHANGELOG.
-const LIMITS = { consumer: 29_000, iife: 30_500 };
+// Ratchet: set just above the multi-level release sizes (31.8 KB / 34.0 KB gzip), which include the multi-level layer
+// (+4.1 KB consumer / +4.5 KB IIFE over 0.2.0). Raise only with a reason in the CHANGELOG.
+const LIMITS = { consumer: 33_500, iife: 36_000 };
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const bundled = await build({

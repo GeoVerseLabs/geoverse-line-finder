@@ -2,12 +2,12 @@
 
 🌐 简体中文 ｜ [English](README.en.md)
 
-| 脚本                                   | 用途                                                                           |
-| -------------------------------------- | ------------------------------------------------------------------------------ |
-| `pnpm bench` (`run.ts`)                | geoverse-line-finder / geojson-path-finder 2.1.0 / terra-route 0.0.18 三库对比 |
-| `pnpm bench:features` (`features.ts`)  | 0.2.0 功能：默认配置对 0.1.0 回归、ALT 地标、双向 Dijkstra、全程择优开销与收益 |
-| `pnpm bench:gpf` (`gpf-root-cause.ts`) | 复现 geojson-path-finder 次优路线并验证根因                                    |
-| `osm-weight.ts`                        | GPF 测试用的 OSM 通行时间权重，原样移植，双方共用同一个函数                    |
+| 脚本                                   | 用途                                                                                                     |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `pnpm bench` (`run.ts`)                | geoverse-line-finder / geojson-path-finder 2.1.0 / terra-route 0.0.18 三库对比                           |
+| `pnpm bench:features` (`features.ts`)  | 0.2.0 功能：默认配置对 0.1.0 回归、ALT 地标、双向 Dijkstra、全程择优开销与收益；楼层感知下界（`levels`） |
+| `pnpm bench:gpf` (`gpf-root-cause.ts`) | 复现 geojson-path-finder 次优路线并验证根因                                                              |
+| `osm-weight.ts`                        | GPF 测试用的 OSM 通行时间权重，原样移植，双方共用同一个函数                                              |
 
 ## 数据
 
@@ -28,7 +28,7 @@
 pnpm bench                                   # 默认 5 轮、每轮 300 对
 pnpm bench -- --rounds 7 --pairs 500
 pnpm bench -- --only osm                     # network,large,osm 任选
-pnpm bench:features                          # regression,alt,bidirectional,optimal,quality 全部
+pnpm bench:features                          # regression,alt,bidirectional,optimal,levels,quality 全部
 pnpm bench:features -- --only alt,optimal
 NODE_OPTIONS=--expose-gc pnpm bench          # 每次运行前强制 GC，降低噪声
 ```

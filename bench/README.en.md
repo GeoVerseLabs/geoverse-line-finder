@@ -2,12 +2,12 @@
 
 🌐 [简体中文](README.md) ｜ English
 
-| Script                                 | Purpose                                                                                                       |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `pnpm bench` (`run.ts`)                | compares geoverse-line-finder / geojson-path-finder 2.1.0 / terra-route 0.0.18                                |
-| `pnpm bench:features` (`features.ts`)  | 0.2.0 features: default configuration against 0.1.0, ALT landmarks, bidirectional Dijkstra, optimal selection |
-| `pnpm bench:gpf` (`gpf-root-cause.ts`) | reproduces geojson-path-finder's non-shortest routes and verifies the root cause                              |
-| `osm-weight.ts`                        | the OSM travel-time weight from GPF's tests, ported verbatim and shared by both sides                         |
+| Script                                 | Purpose                                                                                                                                         |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm bench` (`run.ts`)                | compares geoverse-line-finder / geojson-path-finder 2.1.0 / terra-route 0.0.18                                                                  |
+| `pnpm bench:features` (`features.ts`)  | 0.2.0 features: default configuration against 0.1.0, ALT landmarks, bidirectional Dijkstra, optimal selection; the level-aware bound (`levels`) |
+| `pnpm bench:gpf` (`gpf-root-cause.ts`) | reproduces geojson-path-finder's non-shortest routes and verifies the root cause                                                                |
+| `osm-weight.ts`                        | the OSM travel-time weight from GPF's tests, ported verbatim and shared by both sides                                                           |
 
 ## Data
 
@@ -28,7 +28,7 @@ The 0.1.0 baseline in `features.ts` is the package published on npm, installed a
 pnpm bench                                   # 5 rounds of 300 pairs by default
 pnpm bench -- --rounds 7 --pairs 500
 pnpm bench -- --only osm                     # any of network,large,osm
-pnpm bench:features                          # all of regression,alt,bidirectional,optimal,quality
+pnpm bench:features                          # all of regression,alt,bidirectional,optimal,levels,quality
 pnpm bench:features -- --only alt,optimal
 NODE_OPTIONS=--expose-gc pnpm bench          # force a GC before every run to reduce noise
 ```

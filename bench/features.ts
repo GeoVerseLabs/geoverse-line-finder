@@ -6,6 +6,7 @@
  * - regression: default configurations against the published 0.1.0 (npm alias `glf-baseline`);
  * - alt: A* with and without landmarks; bidirectional: Dijkstra variants without a heuristic;
  * - optimal: nearest vs. optimal selection on the synthetic warehouse (292 tasks × 8 waypoints);
+ * - levels: the level-aware A* bound on a 30-storey building (timings plus settled-node counts);
  * - quality: how much optimal selection saves over nearest snapping (counts, not timings).
  *
  * Every timed scenario rebuilds each contestant per round, runs one warm-up round and rotates the order.
@@ -28,6 +29,7 @@ import {
   type Position,
   type RouteOptions,
 } from '../src';
+import { gridTower } from '../test/fixtures/building';
 import { LEVEL_FACTOR, warehouseNetwork, warehouseTasks, type AisleProps } from '../test/fixtures/warehouse';
 import { osmWeight, type OsmProps } from './osm-weight';
 
@@ -40,7 +42,7 @@ const arg = (name: string, fallback: string) => {
 };
 const ROUNDS = Math.max(3, Number(arg('rounds', '5')));
 const PAIRS = Number(arg('pairs', '300'));
-const ONLY = new Set(arg('only', 'regression,alt,bidirectional,optimal,quality').split(','));
+const ONLY = new Set(arg('only', 'regression,alt,bidirectional,optimal,levels,quality').split(','));
 
 function dataDir(): string {
   const candidates = [
@@ -234,7 +236,10 @@ if (ONLY.has('regression')) {
     contestants: [
       {
         name: '0.1.0',
-        init: () => new baseline.LineFinder(net, { weight: warehouseWeight }) as unknown as Finder,
+        init: () =>
+          new baseline.LineFinder(net, {
+            weight: warehouseWeight as never,
+          }) as unknown as Finder,
       },
       {
         name: '0.2.0',
@@ -326,6 +331,52 @@ if (ONLY.has('optimal')) {
   });
 }
 
+// 30 storeys of 7 x 7 corridor grid with two lifts: the shape indoor routing actually has, and the one
+// the plan-only bound cannot read, because every floor looks equally close from above.
+const tower = gridTower(30, 7, 5, [
+  [1, 1],
+  [5, 5],
+]);
+const { levels: _towerLevels, ...towerPlain } = tower.graphOptions;
+/** One trip straight up per floor: ground floor to the same spot on floor k. */
+const towerTrips = Array.from({ length: 29 }, (_v, k) => [
+  { coordinates: tower.at(1, 1), snap: { group: 1 } },
+  { coordinates: tower.at(1, 1), snap: { group: k + 2 } },
+]) as unknown as Position[][];
+
+if (ONLY.has('levels')) {
+  scenarios.push({
+    id: 'levels-tower',
+    title:
+      'Level-aware A* bound — 30-storey tower (7 × 7 corridor grid per floor, 2 lifts), 29 trips straight up',
+    queries: towerTrips,
+    sameWeights: true,
+    contestants: [
+      {
+        name: 'Dijkstra',
+        init: () => new LineFinder(tower.network, towerPlain) as unknown as Finder,
+        options: { algorithm: 'dijkstra' },
+      },
+      {
+        name: 'A* (plan bound only)',
+        init: () => new LineFinder(tower.network, towerPlain) as unknown as Finder,
+      },
+      {
+        name: 'A* + level bound',
+        init: () => new LineFinder(tower.network, tower.graphOptions) as unknown as Finder,
+      },
+      {
+        name: 'A* + level bound + ALT (8)',
+        init: () =>
+          new LineFinder(tower.network, {
+            ...tower.graphOptions,
+            landmarks: { count: 8 },
+          }) as unknown as Finder,
+      },
+    ],
+  });
+}
+
 // ---- output --------------------------------------------------------------------------------------------
 const header = [
   '# geoverse-line-finder feature benchmark',
@@ -356,6 +407,47 @@ if (ONLY.has('alt')) {
       sections.push(text, '');
     }
   }
+}
+
+if (ONLY.has('levels')) {
+  // Settled nodes are deterministic, so one evaluation is enough (unlike the timings above).
+  const withLevels = new LineFinder(tower.network, tower.graphOptions);
+  const plain = new LineFinder(tower.network, towerPlain);
+  const alt = new LineFinder(withLevels.graph, { landmarks: { count: 8 } });
+  const lines = [
+    '### Settled nodes on the 30-storey tower (one evaluation: expansion counts are deterministic)',
+    '',
+    `graph: ${withLevels.graph.stats.nodes} nodes · per-level bound ${withLevels.graph.heuristic.perLevel.toFixed(2)}`,
+    '',
+    '| trip | Dijkstra | A* (plan only) | A* + level | A* + level + ALT(8) |',
+    '| --- | --- | --- | --- | --- |',
+  ];
+  const settled = (finder: LineFinder<unknown>, points: unknown[], algorithm?: string) => {
+    const r = finder.route(points as never, algorithm ? { algorithm } : undefined);
+    return r.ok ? r.legs[0].settled : NaN;
+  };
+  for (const floor of [5, 10, 20, 30]) {
+    const up = [
+      { coordinates: tower.at(1, 1), snap: { group: 1 } },
+      { coordinates: tower.at(1, 1), snap: { group: floor } },
+    ];
+    lines.push(
+      `| F1 → F${floor} | ${settled(plain as never, up, 'dijkstra')} | ${settled(plain as never, up)} | ` +
+        `${settled(withLevels as never, up)} | ${settled(alt as never, up)} |`,
+    );
+  }
+  const diagonal = [
+    { coordinates: tower.at(1, 1), snap: { group: 1 } },
+    { coordinates: tower.at(6, 6), snap: { group: 30 } },
+  ];
+  lines.push(
+    `| F1 → F30, opposite corner | ${settled(plain as never, diagonal, 'dijkstra')} | ` +
+      `${settled(plain as never, diagonal)} | ${settled(withLevels as never, diagonal)} | ` +
+      `${settled(alt as never, diagonal)} |`,
+  );
+  const text = lines.join('\n');
+  console.log(text);
+  sections.push(text, '');
 }
 
 if (ONLY.has('quality')) {

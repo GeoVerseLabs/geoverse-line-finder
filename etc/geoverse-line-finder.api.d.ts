@@ -305,6 +305,17 @@ interface WeightContext<P = unknown> {
     readonly distance: number;
     readonly featureIndex: number;
     readonly feature: NetworkFeature<P>;
+    /**
+     * Connectivity groups of the segment's two ends, in digitised order; `undefined` in the default group
+     * and inside a connector (whose interior coordinates belong to no group).
+     */
+    readonly fromGroup: GroupKey | undefined;
+    readonly toGroup: GroupKey | undefined;
+    /**
+     * Climb along the digitised direction, from the `levels` elevations (interpolated by length inside a
+     * connector). `0` without `levels`, without elevations, or where either end's elevation is unknown.
+     */
+    readonly rise: number;
 }
 /** Per-direction costs. A missing or falsy direction is impassable. */
 interface DirectionalWeight {
@@ -356,6 +367,64 @@ declare function createSpeedWeight<P>(options: SpeedWeightOptions<P>): WeightFun
  */
 declare function osmDirection(properties: unknown): TravelDirection;
 
+/**
+ * What one connectivity group is, vertically. `ordinal` is what the routing engine reasons about (the
+ * A* level bound and `levelChanges` both count ordinals); `elevation` is the physical height that
+ * `WeightContext.rise`, `verticalDistance` and `output: { z: 'elevation' }` use.
+ */
+interface LevelInfo {
+    /** Storey number: negative underground, adjacent floors differ by 1 (a mezzanine may be 1.5). */
+    ordinal: number;
+    /** Height in metric units. Optional; without it there is no `rise`, `verticalDistance` or z output. */
+    elevation?: number;
+    /** Display name ("B1", "L3"). */
+    name?: string;
+}
+/**
+ * Level metadata per connectivity group: a record keyed by `String(groupKey)`, or a function (which also
+ * receives `undefined` for the default group, so an outdoor level can be given an ordinal too).
+ */
+type LevelsOption = Record<string, LevelInfo> | ((group: GroupKey | undefined) => LevelInfo | null | undefined);
+/** Level metadata by group index (see {@link RoutingGraph.groupKeys}). */
+interface LevelTable {
+    /** Storey number per group; `NaN` when the group has none. */
+    readonly ordinal: Float64Array;
+    /** Height per group; `NaN` when unknown. */
+    readonly elevation: Float64Array;
+    readonly name: readonly (string | undefined)[];
+    /**
+     * Groups that hold live vertices but no `ordinal`. They switch the level bound off for the whole graph
+     * (a level change through them would look free, which would make the bound inadmissible).
+     */
+    readonly missing: readonly number[];
+    /** At least one group has a finite elevation. */
+    readonly hasElevation: boolean;
+}
+/** Travel allowed through a {@link VerticalConnector}: both ways, or only up / only down (escalators). */
+type ConnectorDirection = 'both' | 'up' | 'down';
+/**
+ * A lift shaft, staircase or escalator declared by its stops instead of by geometry. Every pair of stops
+ * becomes one connection, so a ride costs `boardCost + |ordinal difference| * perLevelCost` however many
+ * floors it spans — unlike floor-by-floor connector features, which charge the boarding cost per hop.
+ */
+interface VerticalConnector<P = unknown> {
+    id?: string | number;
+    /** Free-form; carried to `sections[].properties.kind` through the synthesised feature. */
+    kind?: string;
+    /** Where the connector touches each level. A lift repeats one position; stairs give each landing. */
+    stops: readonly {
+        group: GroupKey;
+        position: Position;
+    }[];
+    /** One-off cost of a ride (waiting, getting in and out). Default `0`. */
+    boardCost?: number;
+    /** Cost per level crossed, by `|ordinal difference|`. Default `0`. */
+    perLevelCost?: number;
+    /** `'up'` / `'down'` restrict travel to rising / falling ordinals (escalators). Default `'both'`. */
+    direction?: ConnectorDirection;
+    properties?: P;
+}
+
 interface GraphOptions<P = unknown> {
     /** Distance measure. Default `'haversine'` (coordinates in degrees, distances in meters). */
     metric?: MetricOption;
@@ -363,7 +432,7 @@ interface GraphOptions<P = unknown> {
     weight?: WeightFunction<P>;
     /**
      * Vertices closer than this (metric units) are merged into one. Default `0`: only identical
-     * coordinates connect. geojson-path-finder's default 1e-5° is roughly 1.1 m.
+     * coordinates connect. geojson-path-finder's default 1e-5 deg is roughly 1.1 m.
      */
     tolerance?: number;
     /** Connect dead ends to the nearest segment within this distance (metric units). Default `0` (off). */
@@ -377,6 +446,18 @@ interface GraphOptions<P = unknown> {
      * snapping never join different groups; connector features (`[startGroup, endGroup]`) link them.
      */
     group?: GroupFunction<P>;
+    /**
+     * What each group is vertically (storey number, height, display name). It switches on the level-aware
+     * A* bound, `WeightContext.rise` and the level fields of a route; without it `group` only means
+     * connectivity. See {@link LevelsOption}.
+     */
+    levels?: LevelsOption;
+    /**
+     * Lift shafts, staircases and escalators declared by their stops instead of digitised: every pair of
+     * stops becomes one connection, so a boarding cost is charged once per ride instead of once per floor.
+     * `perLevelCost` and `direction` need `levels`.
+     */
+    verticalConnectors?: readonly VerticalConnector<P>[];
     /** What a weight of `0` means. Default `'impassable'` (geojson-path-finder contract); `'free'` for connectors. */
     zeroWeight?: ZeroWeight;
     /** Record repairs and invalid coordinates so that `graph.diagnostics()` can locate them. Default `false`. */
@@ -392,8 +473,8 @@ interface GraphSettings {
     readonly maxAbsLat: number;
 }
 /**
- * Builds the routing graph: topology → connectivity repair → weights → chain compaction → directed CSR →
- * components → heuristic data → spatial index.
+ * Builds the routing graph: topology -> connectivity repair -> weights -> chain compaction -> directed CSR ->
+ * components -> heuristic data -> spatial index.
  */
 declare function buildGraph<P>(network: NetworkCollection<P>, options?: GraphOptions<P>): RoutingGraph<P>;
 
@@ -439,6 +520,26 @@ interface InvalidCoordinateReport {
     partIndex: number;
     coordinateIndex: number;
 }
+/** A connector end that touches nothing else on the level it serves: the lift or stair is not connected. */
+interface ConnectorEndReport {
+    location: Position;
+    /** The connector feature whose end this is. */
+    featureIndex: number;
+    featureId: string | number | undefined;
+    /** The level the end sits on. */
+    level: GroupKey | undefined;
+}
+/** How the levels of a graph reach each other, by weakly connected component. */
+interface LevelReachability {
+    level: GroupKey | undefined;
+    ordinal: number;
+    /** Weak components holding vertices of this level. */
+    components: number[];
+    /** Levels sharing a component with this one. */
+    connectedTo: (GroupKey | undefined)[];
+    /** No connector touches this level at all. */
+    isolated: boolean;
+}
 interface OverlapReport {
     /** Features of two collinear segments that overlap without being noded. */
     featureIndices: [number, number];
@@ -457,6 +558,18 @@ interface GraphDiagnostics {
     invalidCoordinates: DiagnosticList<InvalidCoordinateReport> | null;
     /** Collinear overlapping segments, which no repair connects. */
     overlaps: DiagnosticList<OverlapReport>;
+    /**
+     * Connector ends that are not joined to their level - the single most common fault in indoor data.
+     * `null` without `levels`.
+     */
+    connectorEnds: DiagnosticList<ConnectorEndReport> | null;
+    /** Which levels can be reached from which. `null` without `levels`. */
+    levelReachability: LevelReachability[] | null;
+    /**
+     * Levels carrying routable network but no `ordinal`. A single one switches the level-aware A* bound
+     * off for the whole graph, because a passage through it would look free. `null` without `levels`.
+     */
+    missingOrdinals: (GroupKey | undefined)[] | null;
 }
 
 /** Strongly connected components of the directed search graph. */
@@ -471,7 +584,10 @@ interface StrongComponents {
 }
 
 declare const GRAPH_FORMAT = "geoverse-line-finder/graph";
-declare const GRAPH_FORMAT_VERSION = 1;
+/** Latest format this build writes. Graphs without `levels` are still written as version 1. */
+declare const GRAPH_FORMAT_VERSION = 2;
+/** Every format this build reads. */
+declare const GRAPH_FORMAT_VERSIONS: readonly number[];
 type ArrayKind = 'f64' | 'i32' | 'u32' | 'u8';
 /** Plain, structured-clone friendly form of a {@link RoutingGraph}. */
 interface TransferableGraph {
@@ -492,8 +608,17 @@ interface GraphHeader {
     heuristic: {
         dims: number;
         scale: number;
+        perLevel: number;
     };
     groupKeys: (GroupKey | null)[];
+    /** Version 2 only: level names and the groups without an ordinal (the arrays travel as buffers). */
+    levels: {
+        name: (string | null)[];
+        missing: number[];
+        hasElevation: boolean;
+    } | null;
+    /** Version 2 only: the features synthesised from `verticalConnectors`, so a worker gets them back. */
+    synthetic: NetworkFeature<unknown>[] | null;
     largestComponent: number;
     rtree: {
         numItems: number;
@@ -548,6 +673,8 @@ interface GraphStats {
     largestComponentNodes: number;
     /** Connectivity groups (1 unless the `group` option is used). */
     groups: number;
+    /** Features synthesised from `verticalConnectors` (appended after the input collection). */
+    verticalConnectors: number;
 }
 interface VertexTable {
     readonly count: number;
@@ -566,6 +693,11 @@ interface VertexTable {
      * `null` when the graph has one group.
      */
     readonly group: Int32Array | null;
+    /**
+     * Height of every vertex, from the `levels` elevations and interpolated by length inside a connector;
+     * `NaN` where unknown, `null` when no level carries an elevation.
+     */
+    readonly elevation: Float64Array | null;
 }
 interface NodeTable {
     readonly count: number;
@@ -661,11 +793,14 @@ interface RoutingGraphParts<P> {
     heuristic: {
         dims: number;
         scale: number;
+        perLevel: number;
     };
     segmentIndex: PackedRTree;
     store: VertexStore;
     remap: Int32Array;
     groupKeys: readonly (GroupKey | undefined)[];
+    levels: LevelTable | null;
+    syntheticFeatures: number;
     settings: GraphSettings;
     diagnosticsLog: DiagnosticsLog | null;
 }
@@ -686,15 +821,23 @@ declare class RoutingGraph<P = unknown> {
     readonly segments: SegmentTable;
     readonly edges: EdgeTable;
     readonly components: ComponentTable;
-    /** A* support: embedding dimension and the admissible cost-per-metric-unit scale (0 = unavailable). */
+    /**
+     * A* support: embedding dimension, the admissible cost-per-metric-unit scale, and `perLevel` — the
+     * cheapest cost of crossing one level over every connector (0 = no level term). All 0 = unavailable.
+     */
     readonly heuristic: {
         readonly dims: number;
         readonly scale: number;
+        readonly perLevel: number;
     };
     /** R-tree over chain segments, used for snapping. */
     readonly segmentIndex: PackedRTree;
     /** Connectivity group keys by index; index 0 is the default group (`undefined`). */
     readonly groupKeys: readonly (GroupKey | undefined)[];
+    /** Level metadata per group, or `null` when the graph was built without `levels`. */
+    readonly levels: LevelTable | null;
+    /** Features at the end of {@link features} that were synthesised from `verticalConnectors`. */
+    readonly syntheticFeatures: number;
     readonly settings: GraphSettings;
     /** @internal */
     readonly diagnosticsLog: DiagnosticsLog | null;
@@ -708,6 +851,7 @@ declare class RoutingGraph<P = unknown> {
     private scc;
     private reverse;
     private incident;
+    private ordinals;
     constructor(parts: RoutingGraphParts<P>);
     segmentCountOf(chain: number): number;
     /** Coordinate at fractional `position` (segment index + t) along `chain`. */
@@ -722,6 +866,14 @@ declare class RoutingGraph<P = unknown> {
     isLiveVertex(vertex: number): boolean;
     /** Group index of a vertex: 0 in a single-group graph, `-1` inside a connector. */
     vertexGroup(vertex: number): number;
+    /** Storey number of a group index, or `NaN` without levels / for the connector interior (`-1`). */
+    groupOrdinal(group: number): number;
+    /** Group index of a location on `chain` at fractional `position` (`-1` inside a connector). */
+    levelAt(chain: number, position: number): number;
+    /** Height of a location on `chain`, interpolated inside the segment; `NaN` when unknown. */
+    elevationAt(chain: number, position: number): number;
+    /** Storey number of every node (computed once, lazily); `NaN` where unknown. */
+    nodeOrdinals(): Float64Array;
     /**
      * Group index of the locations strictly inside segment `slot`: the group of both its ends, or
      * `-1` for a segment of a connector (its ends lie in different groups or in none).
@@ -988,6 +1140,11 @@ declare class AlgorithmRegistry {
 declare function createAlgorithmRegistry(): AlgorithmRegistry;
 
 /**
+ * Where a location sits vertically: a group key for a level, `undefined` for the default group, and
+ * `null` inside a connector — a lift car or a flight of stairs belongs to no level.
+ */
+type LevelKey = GroupKey | undefined | null;
+/**
  * How sections are grouped: `'feature'` (default) merges consecutive pieces of one source feature,
  * `'measure'` additionally splits where the part or the measure is not continuous (so that
  * `Σ |toMeasure − fromMeasure|` equals the distance), `'segment'` returns every traversed segment.
@@ -1008,6 +1165,25 @@ interface RouteSection<P = unknown> {
     toMeasure: number;
     /** Part of a MultiLineString the section starts on (0 for LineStrings). */
     partIndex: number;
+    /**
+     * Level the section runs on, with `levels`: the connectivity group of its locations, or `null` for a
+     * connector (a lift, a staircase, a ramp). Absent when the graph was built without `levels`.
+     */
+    level?: GroupKey | null;
+}
+/** One passage between two levels: a lift ride, a flight of stairs, an escalator. */
+interface LevelTransition {
+    fromLevel: GroupKey | undefined;
+    toLevel: GroupKey | undefined;
+    /** Signed ordinal difference (positive upwards); `0` when an ordinal is unknown. */
+    levelChange: number;
+    /** First and last index (inclusive) into the owning leg's `path`. */
+    start: number;
+    end: number;
+    /** Connector features the passage is made of (a lift taken past several floors merges into one). */
+    featureIndices: number[];
+    weight: number;
+    distance: number;
 }
 
 /** What to do with a waypoint that cannot be snapped or reached. */
@@ -1050,6 +1226,14 @@ interface RouteOptions {
     };
     budget?: SearchBudget;
     sectionsDetail?: SectionsDetail;
+    /** Shape of the output geometry. */
+    output?: {
+        /**
+         * `'elevation'`: write the level height into the third coordinate of every path position (copies
+         * them instead of reusing the network's). Needs `levels` with elevations. Default: off.
+         */
+        z?: 'elevation';
+    };
     debug?: {
         /** Report every candidate of every waypoint with the reason it was or was not used. */
         candidates?: boolean;
@@ -1116,6 +1300,10 @@ interface RouteLeg<P = unknown> {
     kind: 'network' | 'straight';
     /** Connector length included in `path` (with `connectors: 'legs'`). */
     connectorDistance: number;
+    /** With `levels`: the level of every coordinate of `path` (`null` inside a connector). */
+    levels?: LevelKey[];
+    /** With `levels`: the passages between levels along this leg. */
+    transitions?: LevelTransition[];
 }
 interface SkippedWaypoint {
     index: number;
@@ -1147,6 +1335,10 @@ interface RouteSuccess<P = unknown> {
     /** No waypoint was skipped and no leg is straight. */
     complete: boolean;
     skipped: SkippedWaypoint[];
+    /** With `levels`: the number of levels crossed, summed over every passage. */
+    levelChanges?: number;
+    /** With level elevations: the height climbed and descended along the route. */
+    verticalDistance?: number;
 }
 type RouteFailureReason = 'INVALID_INPUT' | 'SNAP_FAILED' | 'DISCONNECTED' | 'UNREACHABLE' | 'ALL_SKIPPED' | 'BUDGET_EXCEEDED';
 type RouteFailureDetail = 
@@ -1288,7 +1480,12 @@ declare class LineFinder<P = unknown> {
     private context;
     /** Geometric bound, strengthened by landmarks when the finder has them. */
     private heuristicFor;
-    /** Admissible, consistent bound to the nearest of `points` (virtual nodes get 0). */
+    /**
+     * Admissible, consistent bound to the nearest goal (virtual nodes get 0): the metric bound in the plane
+     * plus, with `levels`, the cheapest cost of the levels still to be crossed. Without the level term a
+     * search for a floor high above spreads over the whole start floor, because everything there looks
+     * equally close in plan.
+     */
     private geometricHeuristic;
 }
 
@@ -1303,6 +1500,52 @@ interface RouteSummary {
 }
 /** Converts a successful route to a GeoJSON LineString feature; `null` for failures. */
 declare function toLineString<P>(result: RouteResult<P>): LineStringFeature<RouteSummary> | null;
+
+/**
+ * What a piece of the route is: a stretch on one level, a passage between levels, or the point where a
+ * passage starts.
+ */
+type LevelFeatureKind = 'path' | 'connector' | 'transition';
+interface LevelFeatureProperties {
+    kind: LevelFeatureKind;
+    legIndex: number;
+    legKind: 'network' | 'straight';
+    /** First and last index (inclusive) into the leg's `path`. */
+    start: number;
+    end: number;
+    /** `'path'`: the level it runs on. `'connector'` / `'transition'`: `null`. */
+    level: GroupKey | null | undefined;
+    /** `'connector'` / `'transition'` only. */
+    fromLevel?: GroupKey;
+    toLevel?: GroupKey;
+    levelChange?: number;
+    featureIndices?: number[];
+    weight?: number;
+    distance?: number;
+}
+interface LevelFeature {
+    type: 'Feature';
+    geometry: {
+        type: 'LineString';
+        coordinates: Position[];
+    } | {
+        type: 'Point';
+        coordinates: Position;
+    };
+    properties: LevelFeatureProperties;
+}
+interface LevelFeatureCollection {
+    type: 'FeatureCollection';
+    features: LevelFeature[];
+}
+/**
+ * Splits a route into pieces an indoor map can draw one level at a time: one `LineString` per stretch
+ * that stays on a level, one per passage between levels (draw it dashed, it is not on either level), and
+ * a `Point` where each passage starts, carrying the same fields as the leg's `transitions`.
+ *
+ * Returns an empty collection for a failed route, or for one whose graph was built without `levels`.
+ */
+declare function toLevelFeatures<P>(result: RouteResult<P>): LevelFeatureCollection;
 
 /**
  * A* search. With the built-in heuristic (metric embedding × minimum cost-per-length, see
@@ -1348,4 +1591,4 @@ declare class FourAryHeap implements Heap {
     private siftDown;
 }
 
-export { type AlgorithmCapabilities, AlgorithmRegistry, type CandidateCost, type CandidateDistinct, type CandidateFilter, type CandidateInfo, type CandidateOptions, type CandidateReport, type CandidateSide, type CandidateStatus, type ChainTable, type ComponentReport, type ComponentTable, type ConnectorMode, type DangleReport, type DeserializeOptions, type DiagnosticList, type DiagnosticsLog, type DiagnosticsOptions, type DirectionalWeight, EARTH_RADIUS_M, type EdgeTable, type FailurePolicy, FourAryHeap, GRAPH_FORMAT, GRAPH_FORMAT_VERSION, type GeometryLike, type GraphDiagnostics, type GraphHeader, type GraphOptions, type GraphSettings, type GraphStats, type GroupFunction, type GroupKey, type Heap, type HeapConstructor, type Heuristic, type InvalidCoordinateReport, type LandmarkOptions, type LandmarkStrategy, LandmarkTable, LineFinder, type LineFinderOptions, type LineStringFeature, type ManyOptions, type ManyResult, type MatrixResult, type Metric, type MetricOption, type NearestResult, type NetworkCollection, type NetworkFeature, type NodeChainTable, type NodeTable, type OverlapReport, type PathAlgorithm, type PointFeature, type PointGeometry, type Position, type PropertyWeightOptions, type RepairReport, type ReverseEdgeTable, type RouteFailure, type RouteFailureDetail, type RouteFailureReason, type RouteLeg, type RouteOptions, type RouteResult, type RouteSection, type RouteSuccess, type RouteSummary, RoutingGraph, type SearchBudget, type SearchGraph, type SearchRequest, type SearchResult, SearchScratch, type SectionsDetail, type SegmentTable, type SerializeOptions, type SkippedWaypoint, type SnapConnectivity, type SnapCostMode, type SnapMode, type SnapOptions, type SnapSelection, type SnappedWaypoint, type SpeedWeightOptions, type StrongComponents, type TargetPath, type TransferableGraph, type TransferableLandmarks, type TravelDirection, type VertexTable, type WaypointAccess, type WaypointContext, type WaypointInput, type WaypointObject, type WaypointRole, type WaypointSnapOptions, type WeightContext, type WeightFunction, type WeightResult, type ZeroWeight, astar, bidirectionalDijkstra, buildGraph, builtinAlgorithms, cheapRulerMetric, createAlgorithmRegistry, createPropertyWeight, createSpeedWeight, dijkstra, directional, distanceWeight, euclideanMetric, haversineDistance, haversineMetric, osmDirection, prepareLandmarks, reconstructPath, toLineString };
+export { type AlgorithmCapabilities, AlgorithmRegistry, type CandidateCost, type CandidateDistinct, type CandidateFilter, type CandidateInfo, type CandidateOptions, type CandidateReport, type CandidateSide, type CandidateStatus, type ChainTable, type ComponentReport, type ComponentTable, type ConnectorDirection, type ConnectorEndReport, type ConnectorMode, type DangleReport, type DeserializeOptions, type DiagnosticList, type DiagnosticsLog, type DiagnosticsOptions, type DirectionalWeight, EARTH_RADIUS_M, type EdgeTable, type FailurePolicy, FourAryHeap, GRAPH_FORMAT, GRAPH_FORMAT_VERSION, GRAPH_FORMAT_VERSIONS, type GeometryLike, type GraphDiagnostics, type GraphHeader, type GraphOptions, type GraphSettings, type GraphStats, type GroupFunction, type GroupKey, type Heap, type HeapConstructor, type Heuristic, type InvalidCoordinateReport, type LandmarkOptions, type LandmarkStrategy, LandmarkTable, type LevelFeature, type LevelFeatureCollection, type LevelFeatureKind, type LevelFeatureProperties, type LevelInfo, type LevelKey, type LevelReachability, type LevelTable, type LevelTransition, type LevelsOption, LineFinder, type LineFinderOptions, type LineStringFeature, type ManyOptions, type ManyResult, type MatrixResult, type Metric, type MetricOption, type NearestResult, type NetworkCollection, type NetworkFeature, type NodeChainTable, type NodeTable, type OverlapReport, type PathAlgorithm, type PointFeature, type PointGeometry, type Position, type PropertyWeightOptions, type RepairReport, type ReverseEdgeTable, type RouteFailure, type RouteFailureDetail, type RouteFailureReason, type RouteLeg, type RouteOptions, type RouteResult, type RouteSection, type RouteSuccess, type RouteSummary, RoutingGraph, type SearchBudget, type SearchGraph, type SearchRequest, type SearchResult, SearchScratch, type SectionsDetail, type SegmentTable, type SerializeOptions, type SkippedWaypoint, type SnapConnectivity, type SnapCostMode, type SnapMode, type SnapOptions, type SnapSelection, type SnappedWaypoint, type SpeedWeightOptions, type StrongComponents, type TargetPath, type TransferableGraph, type TransferableLandmarks, type TravelDirection, type VertexTable, type VerticalConnector, type WaypointAccess, type WaypointContext, type WaypointInput, type WaypointObject, type WaypointRole, type WaypointSnapOptions, type WeightContext, type WeightFunction, type WeightResult, type ZeroWeight, astar, bidirectionalDijkstra, buildGraph, builtinAlgorithms, cheapRulerMetric, createAlgorithmRegistry, createPropertyWeight, createSpeedWeight, dijkstra, directional, distanceWeight, euclideanMetric, haversineDistance, haversineMetric, osmDirection, prepareLandmarks, reconstructPath, toLevelFeatures, toLineString };
