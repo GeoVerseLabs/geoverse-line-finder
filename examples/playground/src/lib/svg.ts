@@ -149,7 +149,11 @@ export function renderWaypoints(svg: SVGSVGElement, waypoints: WaypointMark[], p
   svg.appendChild(g);
 }
 
-/** Small hollow dots for every candidate a waypoint could have used; the chosen one drawn solid. */
+/**
+ * Small hollow dots for every candidate a waypoint could have used; the chosen one drawn solid. They are
+ * decoration only: `pointer-events: none` keeps them from swallowing clicks meant for the map or for a
+ * level-transition marker underneath.
+ */
 export function renderCandidates(
   svg: SVGSVGElement,
   candidates: { location: Position; selected: boolean }[],
@@ -166,8 +170,52 @@ export function renderCandidates(
         fill: c.selected ? '#f59e0b' : '#fff',
         stroke: '#f59e0b',
         'stroke-width': 1.5,
+        'pointer-events': 'none',
       }),
     );
+  }
+  svg.appendChild(g);
+}
+
+export interface TransitionMark {
+  location: Position;
+  label: string;
+  onClick?: () => void;
+}
+
+/** Marks where a route changes level; clicking one switches the map to the floor it leads to. */
+export function renderTransitions(svg: SVGSVGElement, marks: TransitionMark[], projector: Projector): void {
+  const g = svgEl('g', { class: 'transitions' });
+  for (const m of marks) {
+    const [x, y] = projector.toSvg(m.location);
+    const box = svgEl('rect', {
+      x: x - 7,
+      y: y - 7,
+      width: 14,
+      height: 14,
+      rx: 3,
+      fill: '#f59e0b',
+      stroke: '#fff',
+      'stroke-width': 2,
+      cursor: m.onClick ? 'pointer' : 'default',
+    });
+    if (m.onClick) {
+      box.addEventListener('click', (event) => {
+        event.stopPropagation();
+        m.onClick!();
+      });
+    }
+    g.appendChild(box);
+    const label = svgEl('text', {
+      x: x + 11,
+      y: y + 4,
+      'font-size': 11,
+      fill: '#b45309',
+      'font-family': 'ui-monospace, monospace',
+      'pointer-events': 'none',
+    });
+    label.textContent = m.label;
+    g.appendChild(label);
   }
   svg.appendChild(g);
 }

@@ -40,6 +40,35 @@ a {
   color: var(--accent);
 }
 
+.floors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.floors button {
+  min-width: 44px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--mono);
+  cursor: pointer;
+}
+
+.floors button[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.floors .hint {
+  margin-left: 4px;
+}
+
 .site-header {
   display: flex;
   flex-wrap: wrap;

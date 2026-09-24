@@ -1,11 +1,14 @@
 import {
   LineFinder,
+  toLevelFeatures,
   type CandidateInfo,
+  type GroupKey,
   type NetworkCollection,
   type Position,
   type RouteFailure,
   type RouteOptions,
   type RouteResult,
+  type RouteSuccess,
   type SnapCostMode,
   type SnapMode,
   type SnappedWaypoint,
@@ -17,6 +20,7 @@ import {
   renderDangles,
   renderNetwork,
   renderRoutes,
+  renderTransitions,
   renderWaypoints,
 } from './lib/svg';
 import { scenarios, type Scenario } from './scenarios';
@@ -32,6 +36,8 @@ interface UiState {
   costMode: SnapCostMode;
   onFailure: 'fail' | 'skip' | 'straight';
   featureConstraint: boolean;
+  /** Multi-level scenarios: the floor shown on the map, which new waypoints are placed on. */
+  floor?: GroupKey;
 }
 
 const state: UiState = {
@@ -50,6 +56,7 @@ let projector: Projector | null = null;
 let toData: ((svg: [number, number]) => Position) | null = null;
 let waypoints: Position[] = [];
 let waypointFeatureIds: (string[] | undefined)[] = [];
+let waypointLevels: (GroupKey | undefined)[] = [];
 
 const $ = <T extends Element>(id: string): T => document.getElementById(id) as unknown as T;
 const svg = $<SVGSVGElement>('map');
@@ -67,6 +74,35 @@ function renderTabs(): void {
     btn.addEventListener('click', () => void loadScenario(s));
     tabs.appendChild(btn);
   }
+}
+
+// --------------------------------------------------------------------------------------------- floors
+
+function renderFloors(): void {
+  const el = $<HTMLElement>('floors');
+  el.innerHTML = '';
+  if (!scenario.levels) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  // Top floor first, the way a lift panel reads.
+  for (const floor of [...scenario.levels.floors].reverse()) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = floor.label;
+    btn.setAttribute('aria-pressed', String(floor.key === state.floor));
+    btn.addEventListener('click', () => {
+      state.floor = floor.key;
+      renderFloors();
+      void recompute();
+    });
+    el.appendChild(btn);
+  }
+  const hint = document.createElement('span');
+  hint.className = 'hint';
+  hint.textContent = '当前楼层 · 新途经点落在这一层（snap.group）';
+  el.appendChild(hint);
 }
 
 // -------------------------------------------------------------------------------------------- options
@@ -169,6 +205,13 @@ function renderPresets(): void {
     btn.addEventListener('click', () => {
       waypoints = preset.waypoints.map((p) => [...p]);
       waypointFeatureIds = waypoints.map(() => undefined);
+      waypointLevels = preset.levels
+        ? [...preset.levels]
+        : waypoints.map(() => (scenario.levels ? state.floor : undefined));
+      if (preset.levels?.length) {
+        state.floor = preset.levels[preset.levels.length - 1];
+        renderFloors();
+      }
       void recompute();
     });
     el.appendChild(btn);
@@ -181,6 +224,8 @@ async function loadScenario(next: Scenario<unknown>): Promise<void> {
   scenario = next;
   waypoints = [];
   waypointFeatureIds = [];
+  waypointLevels = [];
+  state.floor = next.levels ? next.levels.floors[0].key : undefined;
   state.selection = next.defaultRouteOptions.snap?.selection === 'optimal' ? 'optimal' : 'nearest';
   state.costMode = (next.defaultRouteOptions.snap?.costMode as SnapCostMode) ?? 'ends';
   state.onFailure = 'fail';
@@ -208,6 +253,7 @@ async function loadScenario(next: Scenario<unknown>): Promise<void> {
   toData = inverseFitProjector(bounds, VIEW_W, VIEW_H, PADDING, latScale);
   svg.setAttribute('viewBox', projector.viewBox);
 
+  renderFloors();
   renderOptions();
   renderPresets();
   renderNetworkOnly();
@@ -219,7 +265,9 @@ async function loadScenario(next: Scenario<unknown>): Promise<void> {
 function renderNetworkOnly(): void {
   if (!network || !projector) return;
   clearSvg(svg);
-  renderNetwork(svg, network, projector, scenario.styleOf);
+  renderNetwork(svg, network, projector, (props, index) =>
+    scenario.styleOf(props, index, { level: state.floor }),
+  );
 }
 
 function renderSummaryHint(): void {
@@ -268,6 +316,7 @@ svg.addEventListener('click', (ev) => {
   const data = toData([local.x, local.y]);
   waypoints.push(data);
   waypointFeatureIds.push(undefined);
+  waypointLevels.push(scenario.levels ? state.floor : undefined);
   if (state.featureConstraint && finder) {
     const candidates = finder.candidates(data, { candidates: 1 });
     const id = candidates[0]?.featureId;
@@ -279,23 +328,32 @@ svg.addEventListener('click', (ev) => {
 $('clear').addEventListener('click', () => {
   waypoints = [];
   waypointFeatureIds = [];
+  waypointLevels = [];
   void recompute();
 });
 
 $('undo').addEventListener('click', () => {
   waypoints.pop();
   waypointFeatureIds.pop();
+  waypointLevels.pop();
   void recompute();
 });
 
 // ------------------------------------------------------------------------------------------- compute
 
+interface WaypointSnap {
+  featureIds?: string[];
+  group?: GroupKey;
+}
+
 function waypointInputs(
   featureIds: (string[] | undefined)[],
-): (Position | { coordinates: Position; snap?: { featureIds: string[] } })[] {
+): (Position | { coordinates: Position; snap: WaypointSnap })[] {
   return waypoints.map((p, i) => {
-    const ids = featureIds[i];
-    return ids ? { coordinates: p, snap: { featureIds: ids } } : p;
+    const snap: WaypointSnap = {};
+    if (featureIds[i]) snap.featureIds = featureIds[i];
+    if (waypointLevels[i] !== undefined) snap.group = waypointLevels[i];
+    return Object.keys(snap).length > 0 ? { coordinates: p, snap } : p;
   });
 }
 
@@ -350,7 +408,8 @@ async function recompute(): Promise<void> {
       onFailure: scenario.features.failurePolicy ? state.onFailure : opts.onFailure,
     });
     if (result.ok) {
-      renderRoutes(svg, [{ path: result.path, color: '#2563eb', width: 5 }], projector);
+      if (scenario.features.levels) renderLevelRoute(result);
+      else renderRoutes(svg, [{ path: result.path, color: '#2563eb', width: 5 }], projector);
     }
     renderSummary(result);
   }
@@ -362,12 +421,68 @@ async function recompute(): Promise<void> {
       candidates: 1,
       mode: state.mode,
       ...(used ? { featureIds: used } : {}),
+      ...(waypointLevels[i] !== undefined ? { group: waypointLevels[i] } : {}),
     });
     return { input: p, location: c[0]?.location, index: i, ok: c.length > 0 };
   });
   renderWaypoints(svg, marks, projector);
 
   if (waypoints.length > 0) renderCandidateHint(waypoints[waypoints.length - 1]);
+}
+
+/**
+ * Draws the route the way an indoor map does: the current floor solid, the other floors ghosted, every
+ * passage between floors dashed, and a clickable marker where the route changes level.
+ */
+function renderLevelRoute(result: RouteSuccess<unknown>): void {
+  if (!projector) return;
+  const { features } = toLevelFeatures(result);
+  const routes: { path: Position[]; color: string; width?: number; dash?: string }[] = [];
+  for (const f of features) {
+    if (f.geometry.type !== 'LineString') continue;
+    const path = f.geometry.coordinates;
+    if (f.properties.kind === 'connector') {
+      routes.push({ path, color: '#f59e0b', width: 6, dash: '5,4' });
+    } else {
+      const active = f.properties.level === state.floor;
+      routes.push({ path, color: active ? '#2563eb' : '#bfdbfe', width: active ? 5 : 3 });
+    }
+  }
+  renderRoutes(svg, routes, projector);
+  renderTransitions(
+    svg,
+    features
+      .filter((f) => f.properties.kind === 'transition' && f.geometry.type === 'Point')
+      .map((f) => ({
+        location: f.geometry.coordinates as Position,
+        label: `${String(f.properties.fromLevel ?? '?')} → ${String(f.properties.toLevel ?? '?')}`,
+        onClick: () => {
+          if (f.properties.toLevel === undefined) return;
+          state.floor = f.properties.toLevel;
+          renderFloors();
+          void recompute();
+        },
+      })),
+    projector,
+  );
+}
+
+function renderTransitionTable(result: RouteResult<unknown>): void {
+  const el = $<HTMLElement>('measures');
+  if (!scenario.features.levels || !result.ok) return;
+  const rows = result.legs
+    .flatMap((leg, legIndex) => (leg.transitions ?? []).map((t) => ({ legIndex, t })))
+    .map(
+      ({ legIndex, t }) =>
+        `<tr><td>#${legIndex}</td><td>${String(t.fromLevel ?? '—')} → ${String(t.toLevel ?? '—')}</td>` +
+        `<td>${t.levelChange > 0 ? '+' : ''}${t.levelChange}</td><td>${t.weight.toFixed(1)}</td>` +
+        `<td>${t.featureIndices.map((i) => String(finder?.graph.featureId(i) ?? i)).join(', ')}</td></tr>`,
+    )
+    .join('');
+  el.innerHTML = rows
+    ? `<p class="hint">换层 · transitions（点地图上的橙色方块可跳层）</p>` +
+      `<table class="wp"><thead><tr><th>leg</th><th>from → to</th><th>Δ</th><th>weight</th><th>features</th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<p class="hint">这条路线没有换层 · no level change</p>';
 }
 
 function summaryHeader(ok: boolean, reasonLine: string): string {
@@ -395,9 +510,16 @@ function renderSummary(result: RouteResult<unknown>): void {
       ['algorithm', result.algorithm],
       ['complete', String(result.complete)],
       ['skipped', String(result.skipped.length)],
+      ...(result.levelChanges !== undefined
+        ? ([['levelChanges', String(result.levelChanges)]] as [string, string][])
+        : []),
+      ...(result.verticalDistance !== undefined
+        ? ([['verticalDistance', result.verticalDistance.toFixed(2)]] as [string, string][])
+        : []),
     ]);
   $<HTMLElement>('waypoints-table').innerHTML = waypointsTable(result.waypoints);
   renderMeasures(result);
+  renderTransitionTable(result);
   $<HTMLElement>('json-output').textContent = JSON.stringify(result, null, 2);
 }
 
@@ -461,7 +583,11 @@ function renderMeasures(result: RouteResult<unknown>): void {
 /** Shows every candidate location the most recently placed waypoint could have used, nearest highlighted. */
 function renderCandidateHint(point: Position): void {
   if (!finder || !projector) return;
-  const list: CandidateInfo[] = finder.candidates(point, { candidates: 6, mode: state.mode });
+  const list: CandidateInfo[] = finder.candidates(point, {
+    candidates: 6,
+    mode: state.mode,
+    ...(scenario.levels && state.floor !== undefined ? { group: state.floor } : {}),
+  });
   renderCandidates(
     svg,
     list.map((c, i) => ({ location: c.location, selected: i === 0 })),
