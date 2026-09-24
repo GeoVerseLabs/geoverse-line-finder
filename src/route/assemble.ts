@@ -1,5 +1,13 @@
 import type { RoutingGraph } from '../graph/graph';
+import type { GroupKey } from '../graph/topology';
+import { NO_GROUP } from '../graph/vertex-store';
 import type { Position } from '../types';
+
+/**
+ * Where a location sits vertically: a group key for a level, `undefined` for the default group, and
+ * `null` inside a connector — a lift car or a flight of stairs belongs to no level.
+ */
+export type LevelKey = GroupKey | undefined | null;
 
 /** Traversal of `chain` from fractional position `start` to `end` (reverse when `end < start`). */
 export interface ChainPiece {
@@ -30,6 +38,71 @@ export interface RouteSection<P = unknown> {
   toMeasure: number;
   /** Part of a MultiLineString the section starts on (0 for LineStrings). */
   partIndex: number;
+  /**
+   * Level the section runs on, with `levels`: the connectivity group of its locations, or `null` for a
+   * connector (a lift, a staircase, a ramp). Absent when the graph was built without `levels`.
+   */
+  level?: GroupKey | null;
+}
+
+/** One passage between two levels: a lift ride, a flight of stairs, an escalator. */
+export interface LevelTransition {
+  fromLevel: GroupKey | undefined;
+  toLevel: GroupKey | undefined;
+  /** Signed ordinal difference (positive upwards); `0` when an ordinal is unknown. */
+  levelChange: number;
+  /** First and last index (inclusive) into the owning leg's `path`. */
+  start: number;
+  end: number;
+  /** Connector features the passage is made of (a lift taken past several floors merges into one). */
+  featureIndices: number[];
+  weight: number;
+  distance: number;
+}
+
+/**
+ * Groups the connector sections of one leg into passages. Consecutive connector sections with no
+ * same-level section between them are one passage, so a floor-by-floor lift (F1-F2, F2-F3) reads as a
+ * single ride from F1 to F3 — which is what a rider experiences and what `levelChanges` counts.
+ */
+export function levelTransitions<P>(
+  graph: RoutingGraph<P>,
+  sections: readonly RouteSection<P>[],
+  levels: readonly LevelKey[],
+): LevelTransition[] {
+  const out: LevelTransition[] = [];
+  const ordinalOf = (key: LevelKey): number =>
+    key === null ? NaN : graph.groupOrdinal(graph.groupIndex(key));
+  for (let i = 0; i < sections.length; i++) {
+    if (sections[i].level !== null) continue;
+    let j = i;
+    let weight = 0;
+    let distance = 0;
+    const featureIndices: number[] = [];
+    while (j < sections.length && sections[j].level === null) {
+      weight += sections[j].weight;
+      distance += sections[j].distance;
+      if (!featureIndices.includes(sections[j].featureIndex)) featureIndices.push(sections[j].featureIndex);
+      j++;
+    }
+    const start = sections[i].start;
+    const end = sections[j - 1].end;
+    const fromLevel = levels[start];
+    const toLevel = levels[end];
+    const change = ordinalOf(toLevel) - ordinalOf(fromLevel);
+    out.push({
+      fromLevel: fromLevel === null ? undefined : fromLevel,
+      toLevel: toLevel === null ? undefined : toLevel,
+      levelChange: Number.isFinite(change) ? change : 0,
+      start,
+      end,
+      featureIndices,
+      weight,
+      distance,
+    });
+    i = j - 1;
+  }
+  return out;
 }
 
 /** Cost of a partial chain traversal; costs are assumed uniform along each segment. */
@@ -80,19 +153,65 @@ export interface AssembledPath<P> {
   distance: number;
   weight: number;
   sections: RouteSection<P>[];
+  /** With `levels`: the level of every path coordinate (`null` inside a connector). */
+  levels: LevelKey[] | null;
+  /** With level elevations: the climbed and descended height along the path. */
+  verticalDistance: number;
 }
 
-/** Turns chain traversals into coordinates, length and per-feature sections. */
+/**
+ * Turns chain traversals into coordinates, length and per-feature sections. With `levels` it also labels
+ * every coordinate with its level and measures the vertical travel; `z` writes the height into the
+ * output coordinates, which then are copies instead of the network's own position objects.
+ */
 export function assemblePieces<P>(
   graph: RoutingGraph<P>,
   pieces: readonly ChainPiece[],
   detail: SectionsDetail = 'feature',
+  z = false,
 ): AssembledPath<P> {
   const path: Position[] = [];
   const sections: RouteSection<P>[] = [];
   const { feature, length, forward, backward, measureStart, measureEnd, part } = graph.segments;
+  const cv = graph.chains.vertices;
+  const withLevels = graph.levels !== null;
+  const levels: LevelKey[] | null = withLevels ? [] : null;
+  const sectionLevel: number[] = [];
+  const elevation = graph.vertices.elevation;
+  const writeZ = z && elevation !== null;
   let distance = 0;
   let weight = 0;
+  let verticalDistance = 0;
+  let lastElevation = NaN;
+
+  /** Group index of a location at `pos` on segment `slot` (whose own span is `[local, local + 1]`). */
+  const groupAt = (chain: number, slot: number, local: number, pos: number): number => {
+    if (!graph.vertices.group) return 0;
+    if (pos === local) return graph.vertexGroup(cv[slot + chain]);
+    if (pos === local + 1) return graph.vertexGroup(cv[slot + chain + 1]);
+    return graph.segmentGroup(slot);
+  };
+  const heightAt = (chain: number, slot: number, local: number, pos: number): number => {
+    if (!elevation) return NaN;
+    const a = elevation[cv[slot + chain]];
+    const f = pos - local;
+    if (f === 0) return a;
+    const b = elevation[cv[slot + chain + 1]];
+    return f === 1 ? b : a + (b - a) * f;
+  };
+  const push = (chain: number, slot: number, local: number, pos: number): void => {
+    const point = graph.pointAt(chain, pos);
+    const height = withLevels ? heightAt(chain, slot, local, pos) : NaN;
+    path.push(writeZ && !Number.isNaN(height) ? [point[0], point[1], height] : point);
+    if (levels) {
+      const g = groupAt(chain, slot, local, pos);
+      levels.push(g === NO_GROUP ? null : graph.groupKeys[g]);
+      if (!Number.isNaN(height) && !Number.isNaN(lastElevation) && path.length > 1) {
+        verticalDistance += Math.abs(height - lastElevation);
+      }
+      lastElevation = height;
+    }
+  };
 
   const emit = (
     chain: number,
@@ -103,8 +222,8 @@ export function assemblePieces<P>(
     fraction: number,
     cost: number,
   ): void => {
-    if (path.length === 0) path.push(graph.pointAt(chain, from));
-    path.push(graph.pointAt(chain, to));
+    if (path.length === 0) push(chain, slot, local, from);
+    push(chain, slot, local, to);
     const d = fraction * length[slot];
     const w = fraction * cost;
     distance += d;
@@ -129,6 +248,9 @@ export function assemblePieces<P>(
       last.distance += d;
       last.weight += w;
       last.toMeasure = toMeasure;
+      if (withLevels && sectionLevel[sections.length - 1] !== graph.segmentGroup(slot)) {
+        sectionLevel[sections.length - 1] = NO_GROUP;
+      }
     } else {
       const source = graph.features[featureIndex];
       sections.push({
@@ -143,6 +265,7 @@ export function assemblePieces<P>(
         toMeasure,
         partIndex: part[slot],
       });
+      if (withLevels) sectionLevel.push(graph.segmentGroup(slot));
     }
   };
 
@@ -163,5 +286,11 @@ export function assemblePieces<P>(
       }
     }
   }
-  return { path, distance, weight, sections };
+  if (withLevels) {
+    for (let i = 0; i < sections.length; i++) {
+      const g = sectionLevel[i];
+      sections[i].level = g === NO_GROUP ? null : graph.groupKeys[g];
+    }
+  }
+  return { path, distance, weight, sections, levels, verticalDistance };
 }

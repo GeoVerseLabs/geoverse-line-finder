@@ -22,8 +22,15 @@ export type {
   SnappedWaypoint,
   WaypointAccess,
 } from './route/finder';
-export type { RouteSection, SectionsDetail } from './route/assemble';
+export type { LevelKey, LevelTransition, RouteSection, SectionsDetail } from './route/assemble';
 export { toLineString, type RouteSummary } from './route/geojson';
+export { toLevelFeatures } from './route/level-features';
+export type {
+  LevelFeature,
+  LevelFeatureCollection,
+  LevelFeatureKind,
+  LevelFeatureProperties,
+} from './route/level-features';
 
 export { buildGraph, type GraphOptions, type GraphSettings } from './graph/build';
 export { RoutingGraph } from './graph/graph';
@@ -41,18 +48,27 @@ export type {
 } from './graph/graph';
 export type { StrongComponents } from './graph/scc';
 export type { GroupFunction, GroupKey } from './graph/topology';
+export type {
+  ConnectorDirection,
+  LevelInfo,
+  LevelTable,
+  LevelsOption,
+  VerticalConnector,
+} from './graph/levels';
 
 export type {
   ComponentReport,
+  ConnectorEndReport,
   DangleReport,
   DiagnosticList,
   DiagnosticsOptions,
   GraphDiagnostics,
   InvalidCoordinateReport,
+  LevelReachability,
   OverlapReport,
   RepairReport,
 } from './graph/diagnostics';
-export { GRAPH_FORMAT, GRAPH_FORMAT_VERSION } from './graph/serialize';
+export { GRAPH_FORMAT, GRAPH_FORMAT_VERSION, GRAPH_FORMAT_VERSIONS } from './graph/serialize';
 export type { DeserializeOptions, GraphHeader, SerializeOptions, TransferableGraph } from './graph/serialize';
 
 export { AlgorithmRegistry, builtinAlgorithms, createAlgorithmRegistry } from './algorithm/registry';

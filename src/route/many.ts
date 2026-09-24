@@ -1,6 +1,7 @@
 import { sameAnchor, searchCandidates, type Candidate } from '../snap/snap';
 import {
   assemblePieces,
+  levelTransitions,
   partialCost,
   piecesDistance,
   type ChainPiece,
@@ -129,7 +130,14 @@ export function solveOneToMany<P>(
     distances[t] = piecesDistance(graph, pieces);
     if (legs) {
       const assembled = assemblePieces(graph, pieces, detail);
+      const levels = assembled.levels;
       legs[t] = {
+        ...(levels
+          ? {
+              levels,
+              transitions: levelTransitions(graph, assembled.sections, levels),
+            }
+          : {}),
         from: 0,
         to: t,
         path: assembled.path.length > 0 ? assembled.path : [source.point],

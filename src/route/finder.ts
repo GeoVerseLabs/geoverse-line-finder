@@ -12,13 +12,14 @@ import { RoutingGraph } from '../graph/graph';
 import type { HeapConstructor } from '../heap/heap';
 import {
   searchCandidates,
+  type Anchor,
   type CandidateInfo,
   type SnapCandidate,
   type SnapMode,
   type SnapOptions,
   type WaypointRole,
 } from '../snap/snap';
-import type { NetworkCollection, Position, WaypointInput } from '../types';
+import type { NetworkCollection, WaypointInput } from '../types';
 import type { SectionsDetail } from './assemble';
 import { composeRoute, type PolicyOptions, type WaypointSpec } from './compose';
 import { snapPoint, solveOneToMany, type SnappedPoint } from './many';
@@ -78,6 +79,46 @@ export interface LineFinderOptions<P = unknown> extends GraphOptions<P> {
    * build one now (two full searches per landmark). Worth it for large directed or time-weighted networks.
    */
   landmarks?: LandmarkTable | LandmarkOptions;
+}
+
+/**
+ * Level span of a goal location: the one level it sits on, or the two levels a connector runs between when
+ * the goal snapped into the middle of a staircase. A node whose ordinal is unknown yields `NaN`, which
+ * switches the level term off for that goal.
+ */
+function goalOrdinalRange(graph: RoutingGraph<unknown>, anchor: Anchor): [number, number] {
+  if (anchor.kind === 'node') {
+    const o = graph.groupOrdinal(graph.vertexGroup(graph.nodes.vertex[anchor.node]));
+    return [o, o];
+  }
+  const { chain, position } = anchor;
+  const group = graph.levelAt(chain, position);
+  if (group >= 0) {
+    const o = graph.groupOrdinal(group);
+    return [o, o];
+  }
+  const base = graph.chains.segStart[chain] + chain;
+  const n = graph.segmentCountOf(chain);
+  const i = Math.floor(position);
+  let low = NaN;
+  let high = NaN;
+  for (let k = i; k >= 0; k--) {
+    const g = graph.vertexGroup(graph.chains.vertices[base + k]);
+    if (g >= 0) {
+      low = graph.groupOrdinal(g);
+      break;
+    }
+  }
+  for (let k = i + 1; k <= n; k++) {
+    const g = graph.vertexGroup(graph.chains.vertices[base + k]);
+    if (g >= 0) {
+      high = graph.groupOrdinal(g);
+      break;
+    }
+  }
+  if (Number.isNaN(low)) low = high;
+  if (Number.isNaN(high)) high = low;
+  return [Math.min(low, high), Math.max(low, high)];
 }
 
 function roleOf(index: number, count: number): WaypointRole {
@@ -262,6 +303,10 @@ export class LineFinder<P = unknown> {
       throw new RangeError(`connectors must be a boolean, "ends" or "legs", got ${String(connectors)}.`);
     }
     const sectionsDetail = resolveDetail(options.sectionsDetail);
+    const z = options.output?.z;
+    if (z !== undefined && z !== 'elevation') {
+      throw new RangeError(`output.z must be "elevation", got ${String(z)}.`);
+    }
     const ctx = this.context(algorithm, options.budget);
 
     const plan =
@@ -278,6 +323,7 @@ export class LineFinder<P = unknown> {
       includeSnapWeight: options.totals?.includeSnapWeight === true,
       includeConnectorDistance: options.totals?.includeConnectorDistance === true,
       sectionsDetail,
+      z: z === 'elevation',
       algorithm: algorithm.name,
     });
   }
@@ -407,20 +453,61 @@ export class LineFinder<P = unknown> {
   /** Geometric bound, strengthened by landmarks when the finder has them. */
   private heuristicFor(goals: readonly SnapCandidate[], origins: readonly SnapCandidate[]): Heuristic | null {
     if (goals.length === 0) return null;
-    const geometric = this.geometricHeuristic(goals.map((g) => g.point));
+    const geometric = this.geometricHeuristic(goals);
     if (!this.landmarks || this.landmarks.count === 0) return geometric;
     return landmarkHeuristic(this.graph as RoutingGraph<unknown>, this.landmarks, goals, origins, geometric);
   }
 
-  /** Admissible, consistent bound to the nearest of `points` (virtual nodes get 0). */
-  private geometricHeuristic(points: readonly Position[]): Heuristic | null {
-    const { dims, scale } = this.graph.heuristic;
-    if (!(scale > 0) || points.length === 0) return null;
+  /**
+   * Admissible, consistent bound to the nearest goal (virtual nodes get 0): the metric bound in the plane
+   * plus, with `levels`, the cheapest cost of the levels still to be crossed. Without the level term a
+   * search for a floor high above spreads over the whole start floor, because everything there looks
+   * equally close in plan.
+   */
+  private geometricHeuristic(goals: readonly SnapCandidate[]): Heuristic | null {
+    const { dims, scale, perLevel } = this.graph.heuristic;
+    if (!(scale > 0) || goals.length === 0) return null;
     const N = this.graph.nodes.count;
     const emb = this.graph.nodes.embedding;
-    const T = points.length;
+    const T = goals.length;
     const t = new Float64Array(dims * T);
-    for (let i = 0; i < T; i++) this.graph.metric.embed!(points[i][0], points[i][1], t, i * dims);
+    for (let i = 0; i < T; i++) {
+      this.graph.metric.embed!(goals[i].point[0], goals[i].point[1], t, i * dims);
+    }
+    if (perLevel > 0) {
+      const lo = new Float64Array(T);
+      const hi = new Float64Array(T);
+      let known = false;
+      for (let i = 0; i < T; i++) {
+        const [a, b] = goalOrdinalRange(this.graph as RoutingGraph<unknown>, goals[i].anchor);
+        lo[i] = a;
+        hi[i] = b;
+        known ||= !Number.isNaN(a);
+      }
+      if (known) {
+        const ordinal = this.graph.nodeOrdinals();
+        return (node) => {
+          if (node >= N) return 0;
+          const o = ordinal[node];
+          let best = Infinity;
+          for (let i = 0; i < T; i++) {
+            let sum = 0;
+            for (let d = 0, p = node * dims, q = i * dims; d < dims; d++) {
+              const diff = emb[p + d] - t[q + d];
+              sum += diff * diff;
+            }
+            let h = scale * Math.sqrt(sum);
+            // Distance from this node's storey to the goal's storey span, priced per level.
+            if (!Number.isNaN(o) && !Number.isNaN(lo[i])) {
+              const gap = o < lo[i] ? lo[i] - o : o > hi[i] ? o - hi[i] : 0;
+              h += perLevel * gap;
+            }
+            if (h < best) best = h;
+          }
+          return best;
+        };
+      }
+    }
     if (T === 1 && dims === 3) {
       const tx = t[0];
       const ty = t[1];

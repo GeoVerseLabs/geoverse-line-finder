@@ -8,7 +8,14 @@ import type {
   WaypointContext,
 } from '../snap/snap';
 import type { Position } from '../types';
-import { assemblePieces, type ChainPiece, type SectionsDetail } from './assemble';
+import {
+  assemblePieces,
+  levelTransitions,
+  type ChainPiece,
+  type LevelKey,
+  type LevelTransition,
+  type SectionsDetail,
+} from './assemble';
 import { snapCostOf, type ResolvedSnap } from './options';
 import type {
   CandidateReport,
@@ -207,6 +214,8 @@ export interface ComposeOptions {
   includeSnapWeight: boolean;
   includeConnectorDistance: boolean;
   sectionsDetail: SectionsDetail;
+  /** Write level elevations into the third coordinate of the output path. */
+  z: boolean;
   algorithm: string;
 }
 
@@ -227,21 +236,34 @@ export function composeRoute<P>(
   let straightDistance = 0;
   let connectorDistance = 0;
   let complete = plan.skipped.length === 0;
+  const withLevels = graph.levels !== null;
+  let levelChanges = 0;
+  let verticalDistance = 0;
 
   for (const pl of plan.legs) {
     let legPath: Position[];
     let legDistance: number;
     let sections: RouteLeg<P>['sections'];
+    let legLevels: LevelKey[] | null = null;
+    let transitions: LevelTransition[] | null = null;
     if (pl.kind === 'network') {
-      const assembled = assemblePieces(graph, pl.pieces, options.sectionsDetail);
+      const assembled = assemblePieces(graph, pl.pieces, options.sectionsDetail, options.z);
       legPath = assembled.path.length > 0 ? assembled.path : [pl.start];
       legDistance = assembled.distance;
       sections = assembled.sections;
+      if (assembled.levels) {
+        legLevels = assembled.levels.length > 0 ? assembled.levels : [graph.groupKeys[0]];
+        transitions = levelTransitions(graph, sections, legLevels);
+        verticalDistance += assembled.verticalDistance;
+      }
     } else {
       complete = false;
       legPath = samePoint(pl.start, pl.end) ? [pl.start] : [pl.start, pl.end];
       legDistance = metric.distance(pl.start, pl.end);
       sections = [];
+      // A straight bridge has no network locations, so it carries no level information.
+      if (withLevels) legLevels = legPath.map(() => null);
+      transitions = [];
     }
     let legConnector = 0;
     if (options.connectors === 'legs') {
@@ -250,9 +272,11 @@ export function composeRoute<P>(
       const head = legPath[0];
       const tail = legPath[legPath.length - 1];
       const withConnectors: Position[] = [];
+      let shift = 0;
       if (!samePoint(a, head)) {
         withConnectors.push(a);
         legConnector += metric.distance(a, head);
+        shift = 1;
       }
       withConnectors.push(...legPath);
       if (!samePoint(tail, b)) {
@@ -260,8 +284,27 @@ export function composeRoute<P>(
         legConnector += metric.distance(tail, b);
       }
       legPath = withConnectors;
+      // Path indices stay usable: everything that points into the leg path moves with the connector.
+      if (shift > 0) {
+        for (const section of sections) {
+          section.start += shift;
+          section.end += shift;
+        }
+        if (transitions) {
+          for (const transition of transitions) {
+            transition.start += shift;
+            transition.end += shift;
+          }
+        }
+      }
+      // A connector runs in the plane between the input point and its snapped location: same level.
+      if (legLevels && legLevels.length > 0) {
+        if (shift > 0) legLevels.unshift(legLevels[0]);
+        while (legLevels.length < legPath.length) legLevels.push(legLevels[legLevels.length - 1]);
+      }
     }
-    legs.push({
+    if (transitions) for (const t of transitions) levelChanges += Math.abs(t.levelChange);
+    const leg: RouteLeg<P> = {
       from: pl.from,
       to: pl.to,
       path: legPath,
@@ -272,7 +315,10 @@ export function composeRoute<P>(
       relaxed: pl.relaxed,
       kind: pl.kind,
       connectorDistance: legConnector,
-    });
+    };
+    if (legLevels) leg.levels = legLevels;
+    if (transitions) leg.transitions = transitions;
+    legs.push(leg);
     weight += pl.weight;
     distance += legDistance;
     if (pl.kind === 'network') {
@@ -320,7 +366,13 @@ export function composeRoute<P>(
   if (options.includeSnapWeight) weight += snapWeight;
   if (options.includeConnectorDistance) distance += connectorDistance;
 
+  const totals: Pick<RouteSuccess<P>, 'levelChanges' | 'verticalDistance'> = {};
+  if (withLevels) {
+    totals.levelChanges = levelChanges;
+    if (graph.vertices.elevation) totals.verticalDistance = verticalDistance;
+  }
   return {
+    ...totals,
     ok: true,
     path,
     weight,

@@ -1,7 +1,7 @@
 import type { PathAlgorithm } from '../algorithm/types';
 import type { CandidateInfo, SnapMode, SnapOptions } from '../snap/snap';
 import type { Position } from '../types';
-import type { RouteSection, SectionsDetail } from './assemble';
+import type { LevelKey, LevelTransition, RouteSection, SectionsDetail } from './assemble';
 
 /** What to do with a waypoint that cannot be snapped or reached. */
 export type FailurePolicy = 'fail' | 'skip' | 'straight';
@@ -45,6 +45,14 @@ export interface RouteOptions {
   };
   budget?: SearchBudget;
   sectionsDetail?: SectionsDetail;
+  /** Shape of the output geometry. */
+  output?: {
+    /**
+     * `'elevation'`: write the level height into the third coordinate of every path position (copies
+     * them instead of reusing the network's). Needs `levels` with elevations. Default: off.
+     */
+    z?: 'elevation';
+  };
   debug?: {
     /** Report every candidate of every waypoint with the reason it was or was not used. */
     candidates?: boolean;
@@ -116,6 +124,10 @@ export interface RouteLeg<P = unknown> {
   kind: 'network' | 'straight';
   /** Connector length included in `path` (with `connectors: 'legs'`). */
   connectorDistance: number;
+  /** With `levels`: the level of every coordinate of `path` (`null` inside a connector). */
+  levels?: LevelKey[];
+  /** With `levels`: the passages between levels along this leg. */
+  transitions?: LevelTransition[];
 }
 
 export interface SkippedWaypoint {
@@ -149,6 +161,10 @@ export interface RouteSuccess<P = unknown> {
   /** No waypoint was skipped and no leg is straight. */
   complete: boolean;
   skipped: SkippedWaypoint[];
+  /** With `levels`: the number of levels crossed, summed over every passage. */
+  levelChanges?: number;
+  /** With level elevations: the height climbed and descended along the route. */
+  verticalDistance?: number;
 }
 
 export type RouteFailureReason =
