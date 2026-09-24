@@ -14,7 +14,14 @@ const norm = (value: WeightResult) => {
   return out;
 };
 
-const ctx = { distance: 100, featureIndex: 0, feature: { geometry: null } };
+const ctx = {
+  distance: 100,
+  featureIndex: 0,
+  feature: { geometry: null },
+  fromGroup: undefined,
+  toGroup: undefined,
+  rise: 0,
+};
 
 describe('normalizeWeight (geojson-path-finder contract)', () => {
   it('numbers apply to both directions', () => {

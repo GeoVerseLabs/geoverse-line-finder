@@ -152,7 +152,14 @@ export class ReferenceGraph<P> {
         const b = coords[i + 1];
         if (key(a) === key(b)) continue;
         const [fwd, bwd] = directedCosts(
-          weight(a, b, feature.properties as P, { distance: distance(a, b), featureIndex, feature }),
+          weight(a, b, feature.properties as P, {
+            distance: distance(a, b),
+            featureIndex,
+            feature,
+            fromGroup: undefined,
+            toGroup: undefined,
+            rise: 0,
+          }),
         );
         this.link(a, b, fwd);
         this.link(b, a, bwd);
