@@ -6,7 +6,22 @@ This project follows [Semantic Versioning](https://semver.org/); while in 0.x, m
 
 ## Unreleased
 
-With default options (no `group`) the output is still bit-identical to 0.1.0 (golden tests unchanged). The changes below only affect connectivity groups and snap constraints.
+With default options (no `group` / `levels`) the output is still bit-identical to 0.1.0 (golden tests unchanged). The changes below only affect connectivity groups, level semantics and snap constraints.
+
+### Added: multi-level routing
+
+The full story is in [docs/MULTI_LEVEL.en.md](docs/MULTI_LEVEL.en.md). The engine contract (`SearchGraph` / `PathAlgorithm`) is unchanged, so custom engines are unaffected.
+
+- **`levels` build option**: gives every connectivity group a storey number `ordinal`, an optional `elevation` and a `name`; either a record keyed by `String(groupKey)` or a function. Without it nothing is switched on.
+- **Level-aware A\* bound**: `h(u)` gains `perLevel · distance(ord(u), the target's level range)`. `perLevel` is derived per **connector run** rather than per compacted chain, with an admissibility argument, randomised differential tests and a property test. On a 30-storey synthetic building one vertical trip settles 30 nodes instead of 883 (`pnpm bench:features --only levels`); when the target is also far away in plan the gain is small — see §7.2 of the guide for why. `graph.heuristic.perLevel` exposes it.
+- **`verticalConnectors` build option**: declare lifts, stair shafts and escalators by their stops; they expand to all-stops-connected links. One ride is **one** section costing `boardCost + |Δordinal| × perLevelCost` — floor-by-floor connector features charge the boarding once per hop instead. `direction: 'up' | 'down'` expresses a one-way escalator.
+- **`WeightContext` gains `fromGroup` / `toGroup` / `rise`**: `rise` is the climb along the digitised direction (interpolated by length inside a connector), so stairs can be written as `ctx.distance + 8 * Math.max(ctx.rise, 0)`.
+- **Levels in the result** (only with `levels`): `sections[].level`, `legs[].levels` (one per path coordinate), `legs[].transitions`, `levelChanges`, `verticalDistance`. Consecutive connector sections with no same-level section between them merge into **one** passage, so a floor-by-floor lift taken F1→F2→F3 reads as a single `1 → 3`.
+- **`toLevelFeatures(result)`**: a separate export (tree-shaken when unused) that splits a route into per-level `LineString`s, connector `LineString`s and passage `Point`s — the direct input for rendering an indoor map one floor at a time.
+- **`output: { z: 'elevation' }` route option**: writes the height into the third coordinate (`path` then holds copies).
+- **Level diagnostics**: `connectorEnds` (a connector end that never joined its floor), `levelReachability` (which components each level lies in and which levels it reaches), `missingOrdinals` (groups without an ordinal, which switch the level bound off).
+- **Serialisation format 2**: graphs with `levels` or `verticalConnectors` are written as `formatVersion: 2` (three extra buffers for level ordinals, level elevations and per-vertex elevations, with level names and the synthesised features in the header); everything else still writes 1. Readers accept both, and an older build fails loudly on 2. Deserialising needs only the input features — the synthesised connector features come back from the header.
+- The playground gains a **multi-level** scenario: floor switching, per-level drawing and clickable passage markers.
 
 ### Fixed
 
@@ -18,12 +33,16 @@ With default options (no `group`) the output is still bit-identical to 0.1.0 (go
 - Snap failure detail `detail: 'SCAN_LIMIT'`: the `searchLimit` nearest locations were all excluded by constraints and allowed ones may lie farther away (previously reported as `FILTERED`) — raise `searchLimit`.
 - `graph.vertexGroup()` / `segmentGroup()` / `groupSpatialIndex()`.
 
+- **`sections[].start/end` were off by one with `connectors: 'legs'`**: the straight connector prepended to `leg.path` did not shift the section indices, so they pointed at the wrong coordinates. `sections`, `transitions` and `levels` now all index `leg.path` consistently.
+
 ### Changed
 
 - The interior coordinates of connectors can no longer be snapped to with `mode: 'exact'`, and `graph.findVertex()` does not find them.
 - Candidate `group`: `undefined` on a staircase (an interior coordinate, or inside a segment between groups); it used to take one end's group depending on the chain direction.
 - Topology diagnostics: connectors are no longer reported as collinear overlaps (stairs stacked floor above floor are drawn that way); near misses of dead ends only consider segments lying entirely in their group, matching the `snapDangles` repair.
-- Size: +0.7 KB gzip (per-group indexes, scan truncation), still within the gate.
+- `stats` gains `verticalConnectors` (the number of synthesised features); with `verticalConnectors` set, `stats.features` and `graph.features.length` include them.
+- `GRAPH_FORMAT_VERSION` changed from 1 to 2 (the newest format this build writes); `GRAPH_FORMAT_VERSIONS` lists every format it reads. Graphs without level semantics still write 1.
+- **Size gate raised**: consumer 29 000 → 33 500 B, IIFE 30 500 → 36 000 B. Measured 27.8 → 31.8 KB / 29.7 → 34.0 KB gzip; the extra 4.1 KB is this release's level layer (per-group indexes +0.7 KB, level semantics +3.4 KB). The result converter `toLevelFeatures` is a separate export and does not count unless used.
 
 ## 0.2.0 — 2026-09-14
 

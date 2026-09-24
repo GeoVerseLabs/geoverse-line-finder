@@ -6,7 +6,22 @@
 
 ## 未发布
 
-默认配置（不用 `group`）下的输出仍与 0.1.0 逐位相同（金样本测试不变）。以下只影响使用连通分组或吸附约束的场景。
+默认配置（不用 `group` / `levels`）下的输出仍与 0.1.0 逐位相同（金样本测试不变）。以下只影响使用连通分组、楼层语义或吸附约束的场景。
+
+### 新增：多楼层语义
+
+完整说明见 [docs/MULTI_LEVEL.md](docs/MULTI_LEVEL.md)。引擎契约（`SearchGraph` / `PathAlgorithm`）没有变化，自定义引擎不受影响。
+
+- **`levels` 建图选项**：给每个连通分组一个楼层序号 `ordinal`、可选标高 `elevation` 与显示名 `name`；可以是按 `String(groupKey)` 查的对象，也可以是函数。不配就什么都不启用。
+- **楼层感知的 A\* 下界**：`h(u)` 增加 `perLevel · dist(ord(u), 目标楼层区间)` 一项。`perLevel` 按**连接器段**（而非链压缩后的链）推导，并有可采纳性论证、随机差分与性质测试。30 层合成楼栋上一趟竖向行程的展开节点数 883 → 30（`pnpm bench:features --only levels`）；目标在平面上也很远时收益很小，原因与边界见文档 §7.2。`graph.heuristic.perLevel` 可读。
+- **`verticalConnectors` 建图选项**：按停靠站声明电梯 / 楼梯井 / 扶梯，展开为站间全连。一次乘坐是**一段**，代价 `boardCost + |Δ楼层| × perLevelCost`——逐跳连接要素会把候梯代价按层重复计。支持 `direction: 'up' | 'down'` 表达单向扶梯。
+- **`WeightContext` 增加 `fromGroup` / `toGroup` / `rise`**：`rise` 是沿数字化方向的标高差（连接器中段按长度插值），楼梯可以写成 `ctx.distance + 8 * Math.max(ctx.rise, 0)`。
+- **结果里的楼层**（仅在配了 `levels` 时出现）：`sections[].level`、`legs[].levels`（与 `path` 逐点对应）、`legs[].transitions`、`levelChanges`、`verticalDistance`。相邻连接器段之间没有同层段时合并为**一次**换层，所以逐跳电梯 F1→F2→F3 读出来是一次 `1 → 3`。
+- **`toLevelFeatures(result)`**：独立导出（不用就被摇掉），把路线拆成按层的 `LineString`、换层段的 `LineString` 与换层点的 `Point`，室内地图按层渲染的直接输入。
+- **`output: { z: 'elevation' }` 路由选项**：把标高写进路径坐标第三维（此时 `path` 是复制出来的坐标）。
+- **楼层诊断**：`connectorEnds`（连接器端点没接上本层）、`levelReachability`（各层落在哪些连通分量、能到哪些层）、`missingOrdinals`（缺序号、会关掉楼层下界的分组）。
+- **序列化格式 2**：有 `levels` 或 `verticalConnectors` 的图写 `formatVersion: 2`（楼层序号 / 标高 / 逐顶点标高三个缓冲区，头部带楼层名与合成要素），其余仍写 1；读取端两版都收，旧版读到 2 会明确报错。反序列化时传入输入要素即可，合成出来的连接器要素随头部一起回来。
+- 示例站新增 **"多楼层 · 电梯 / 楼梯 / 扶梯"** 场景：楼层切换、按层绘制、可点击的换层标记。
 
 ### 修复
 
@@ -18,12 +33,16 @@
 - 吸附失败细节 `detail: 'SCAN_LIMIT'`：`searchLimit` 个最近位置全被约束排除、更远处可能有允许位置时报它（原先混在 `FILTERED` 里），提示调大 `searchLimit`。
 - `graph.vertexGroup()` / `segmentGroup()` / `groupSpatialIndex()`。
 
+- **`connectors: 'legs'` 下 `sections[].start/end` 错位**：前置的直线连接段插入 `leg.path` 后，段落下标没有跟着平移，指到的是错位的坐标。现在 `sections`、`transitions` 与 `levels` 的下标都与 `leg.path` 一致。
+
 ### 变更
 
 - 连接要素的中间坐标不再能被 `mode: 'exact'` 吸附，`graph.findVertex()` 也找不到它们。
 - 候选描述 `group`：落在楼梯中段（中间坐标或两端不同组的线段内部）时为 `undefined`，原先按链方向取某一端的组。
 - 拓扑诊断：连接要素不再报共线重叠（逐层重叠的楼梯本来就是这样画的）；悬挂端点的近距离未接通只看整段都在同组的线段，与 `snapDangles` 修复口径一致。
-- 体积：+0.7 KB gzip（按组索引、扫描截断判定），仍在门禁以内。
+- `stats` 新增 `verticalConnectors`（展开出来的合成要素数量）；配了 `verticalConnectors` 时 `stats.features` 与 `graph.features.length` 包含它们。
+- `GRAPH_FORMAT_VERSION` 由 1 改为 2（这一版能写的最新格式），新增 `GRAPH_FORMAT_VERSIONS`（能读的全部格式）。没有楼层语义的图仍写 1。
+- **体积门禁上调**：consumer 29 000 → 33 500 B、IIFE 30 500 → 36 000 B。实测 27.8 → 31.8 KB / 29.7 → 34.0 KB gzip，多出来的 4.1 KB 全部是这一版的楼层层（分组索引 +0.7 KB、楼层语义 +3.4 KB）。结果转换 `toLevelFeatures` 是独立导出，不使用的话不计入。
 
 ## 0.2.0 — 2026-09-14
 

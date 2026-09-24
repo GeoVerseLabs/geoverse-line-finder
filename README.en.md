@@ -129,6 +129,8 @@ The A\* heuristic is admissible for **any** weight (metric embedding × the netw
 | `splitIntersections` | `false`        | split lines where they cross or touch without a shared vertex (this also joins overpasses — keep them apart with `group`)                   |
 | `compact`            | `true`         | collapse degree-2 vertices into chains: identical results, faster search                                                                    |
 | `group`              | —              | connectivity groups (floors, overpass levels): merging, repairs and snapping never cross groups; connectors return `[startGroup, endGroup]` |
+| `levels`             | —              | storey number / height / display name per group: switches on the level bound, `rise`, and the level fields of a result                      |
+| `verticalConnectors` | —              | lifts and stair shafts declared by their stops: one ride is one section, and boarding is charged once                                       |
 | `zeroWeight`         | `'impassable'` | what a weight of `0` means; `'free'` makes zero-length connectors such as elevators free to pass                                            |
 | `diagnostics`        | `false`        | record repairs and invalid coordinates for `graph.diagnostics()`                                                                            |
 | `landmarks`          | —              | ALT landmarks (`LineFinder` only), see above                                                                                                |
@@ -266,23 +268,43 @@ d.overlaps; // collinear overlapping segments that nothing splits
 
 Each is `{ items, total, truncated }`; items beyond `limit` are only counted.
 
-## Groups (non-planar networks)
+## Multiple levels (non-planar networks)
 
-When floors or overpasses overlap in the plane, keep them apart with `group` and join them with connector features:
+When floors or overpasses overlap in the plane, keep them apart with `group` and join them with connector features; then tell the library what each group is vertically with `levels`:
 
 ```ts
 const finder = new LineFinder(building, {
-  group: (p) => (p.elevator ? [p.fromFloor, p.toFloor] : p.floor),
-  zeroWeight: 'free', // an elevator is a zero-length line: let it pass for free (or give it a fixed weight)
+  metric: 'euclidean',
   splitIntersections: true, // splits happen within each floor only
+  group: (p) => (p.kind === 'corridor' ? p.floor : [p.from, p.to]),
+  levels: (g) => (typeof g === 'number' ? { ordinal: g, elevation: (g - 1) * 4, name: `F${g}` } : undefined),
+  weight: (a, b, p, ctx) => (p.kind === 'corridor' ? ctx.distance : 12), // a lift needs a fixed positive cost, not 0
+  verticalConnectors: [
+    // Declarative lift: one ride is one section, and boarding is charged once
+    {
+      id: 'lift',
+      stops: [1, 2, 3, 4].map((f) => ({ group: f, position: [30, 20] })),
+      boardCost: 8,
+      perLevelCost: 2,
+    },
+  ],
 });
-finder.route([
-  { coordinates: a, snap: { group: 'F1' } },
-  { coordinates: b, snap: { group: 'F3' } },
+
+const route = finder.route([
+  { coordinates: a, snap: { group: 1 } },
+  { coordinates: b, snap: { group: 4 } },
 ]);
+route.levelChanges; //  3 storeys crossed
+route.verticalDistance; // 12 climbed in total
+route.legs[0].transitions; // every passage: from/to level, signed change, indices into path, connector features
+toLevelFeatures(route); // a FeatureCollection split by level - the direct input for an indoor map
 ```
 
-Only the ends of a connector belong to floors (the first coordinate to the start group, the last to the end group). Its interior coordinates — the steps and landings of a staircase — **belong to no group**: they never merge with floor vertices, take no part in repairs, and a waypoint with a `group` constraint never snaps onto them. So attach both ends of a staircase to its floors: give them the coordinates of floor vertices, or let `tolerance` / `snapDangles` connect them within the floor.
+Only the ends of a connector belong to floors (the first coordinate to the start group, the last to the end group). Its interior coordinates — the steps and landings of a staircase — **belong to no group**: they never merge with floor vertices, take no part in repairs, and a waypoint with a `group` constraint never snaps onto them. So attach both ends of a staircase to its floors: give them the coordinates of floor vertices, or let `tolerance` / `snapDangles` connect them within the floor — `graph.diagnostics().connectorEnds` tells you whether they landed.
+
+With `levels` set, a **level-aware A\* bound** switches on as well: on a 30-storey building one vertical trip settles 30 nodes instead of 883. Without `levels` nothing changes — no level fields, no bound, and output bit-identical to 0.1.0.
+
+The full story (data modelling, cost semantics, per-level rendering, performance limits and troubleshooting) is in **[docs/MULTI_LEVEL.en.md](docs/MULTI_LEVEL.en.md)**.
 
 ## Workers and serialisation
 
@@ -314,7 +336,7 @@ Landmark tables work the same way: `table.toTransferable()` / `LandmarkTable.fro
 - All structures are flat typed arrays; queries reuse scratch buffers and only touch the nodes they visit.
 - Tests include golden outputs of 0.1.0 (default options stay bit-identical), randomized differential testing against a naive reference implementation, optimal selection against a brute force over every candidate combination, strongly connected components against mutual reachability, every assertion from geojson-path-finder's own suite, and pair-by-pair comparison with an independent referee on geojson-path-finder's 135k-coordinate one-way OSM network.
 - CI runs the full gate on Node 20 / 22 (including a bundle-size gate and a public API report), loads the built package on Node 18 / 20 / 22 including a worker round trip, and compiles a consumer against the declarations with TypeScript 5.0 / 5.4 / 5.7 / 5.9; pushing a `vX.Y.Z` tag publishes to npm — see [docs/RELEASE.en.md](docs/RELEASE.en.md).
-- Measurements and how to reproduce them: [docs/BENCHMARK.en.md](docs/BENCHMARK.en.md); design notes: [docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md).
+- Measurements and how to reproduce them: [docs/BENCHMARK.en.md](docs/BENCHMARK.en.md); design notes: [docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md); multi-level routing: [docs/MULTI_LEVEL.en.md](docs/MULTI_LEVEL.en.md).
 
 ```bash
 pnpm test             # unit + differential + brute force + golden outputs

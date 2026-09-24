@@ -120,17 +120,19 @@ A\* 的启发式对**任意**权重都可采纳（度量嵌入 × 全网最小"�
 
 `new LineFinder(network, options)` / `buildGraph(network, options)`：
 
-| 选项                 | 默认           | 说明                                                                                              |
-| -------------------- | -------------- | ------------------------------------------------------------------------------------------------- |
-| `metric`             | `'haversine'`  | `'haversine'`（经纬度，米）、`'cheap-ruler'`、`'euclidean'`（投影坐标）或自定义                   |
-| `tolerance`          | `0`            | 相距不超过该距离的顶点合并为一个（按真实距离判断；geojson-path-finder 默认 1e-5° ≈ 1.1 m）        |
-| `snapDangles`        | `0`            | 把悬挂端点接到该距离内最近的线段上                                                                |
-| `splitIntersections` | `false`        | 在未共点的交叉/接触处打断（会把立交也接上：用 `group` 分开）                                      |
-| `compact`            | `true`         | 度 2 顶点压缩成链，结果不变、搜索更快                                                             |
-| `group`              | —              | 连通分组（楼层、立交层）：合并、修复与吸附都不跨组，连接要素返回 `[起点组, 终点组]`（见分层一节） |
-| `zeroWeight`         | `'impassable'` | 权重 `0` 的含义；`'free'` 让电梯这类零长度连接边零代价可通行                                      |
-| `diagnostics`        | `false`        | 记录修复与非法坐标，供 `graph.diagnostics()` 定位                                                 |
-| `landmarks`          | —              | ALT 地标（`LineFinder` 专有），见上节                                                             |
+| 选项                 | 默认           | 说明                                                                                                |
+| -------------------- | -------------- | --------------------------------------------------------------------------------------------------- |
+| `metric`             | `'haversine'`  | `'haversine'`（经纬度，米）、`'cheap-ruler'`、`'euclidean'`（投影坐标）或自定义                     |
+| `tolerance`          | `0`            | 相距不超过该距离的顶点合并为一个（按真实距离判断；geojson-path-finder 默认 1e-5° ≈ 1.1 m）          |
+| `snapDangles`        | `0`            | 把悬挂端点接到该距离内最近的线段上                                                                  |
+| `splitIntersections` | `false`        | 在未共点的交叉/接触处打断（会把立交也接上：用 `group` 分开）                                        |
+| `compact`            | `true`         | 度 2 顶点压缩成链，结果不变、搜索更快                                                               |
+| `group`              | —              | 连通分组（楼层、立交层）：合并、修复与吸附都不跨组，连接要素返回 `[起点组, 终点组]`（见多楼层一节） |
+| `levels`             | —              | 每个分组的楼层序号 / 标高 / 显示名：开启楼层下界、`rise` 与结果里的楼层字段                         |
+| `verticalConnectors` | —              | 按停靠站声明的电梯 / 楼梯井：一次乘坐 = 一段，候梯代价只计一次                                      |
+| `zeroWeight`         | `'impassable'` | 权重 `0` 的含义；`'free'` 让电梯这类零长度连接边零代价可通行                                        |
+| `diagnostics`        | `false`        | 记录修复与非法坐标，供 `graph.diagnostics()` 定位                                                   |
+| `landmarks`          | —              | ALT 地标（`LineFinder` 专有），见上节                                                               |
 
 地理度量下，坐标超出 `[-180, 180] × [-90, 90]`（多半是误传了投影坐标）或线段跨越 ±180° 经线时，建图直接抛 `RangeError`，不再静默算出错误距离。
 
@@ -265,23 +267,43 @@ d.overlaps; // 共线重叠却未打断的线段
 
 每一项都是 `{ items, total, truncated }`，超过 `limit` 的只计数。
 
-## 分层（非平面路网）
+## 多楼层（非平面路网）
 
-楼层、立交在平面上重叠时，用 `group` 把它们分开，再用连接要素相连：
+楼层、立交在平面上重叠时，用 `group` 把它们分开、用连接要素相连；再用 `levels` 告诉库"这一组是第几层、标高多少"：
 
 ```ts
 const finder = new LineFinder(building, {
-  group: (p) => (p.elevator ? [p.fromFloor, p.toFloor] : p.floor),
-  zeroWeight: 'free', // 电梯是零长度线：让它零代价可通行（或在 weight 里给固定代价）
+  metric: 'euclidean',
   splitIntersections: true, // 只在各楼层内部打断
+  group: (p) => (p.kind === 'corridor' ? p.floor : [p.from, p.to]),
+  levels: (g) => (typeof g === 'number' ? { ordinal: g, elevation: (g - 1) * 4, name: `F${g}` } : undefined),
+  weight: (a, b, p, ctx) => (p.kind === 'corridor' ? ctx.distance : 12), // 电梯给固定正代价，别用 0
+  verticalConnectors: [
+    // 声明式电梯：一次乘坐 = 一段，候梯代价只计一次
+    {
+      id: 'lift',
+      stops: [1, 2, 3, 4].map((f) => ({ group: f, position: [30, 20] })),
+      boardCost: 8,
+      perLevelCost: 2,
+    },
+  ],
 });
-finder.route([
-  { coordinates: a, snap: { group: 'F1' } },
-  { coordinates: b, snap: { group: 'F3' } },
+
+const route = finder.route([
+  { coordinates: a, snap: { group: 1 } },
+  { coordinates: b, snap: { group: 4 } },
 ]);
+route.levelChanges; //  3：跨了 3 层
+route.verticalDistance; // 12：爬升合计
+route.legs[0].transitions; // 每一次换层：起止楼层、有符号层数差、在 path 里的下标、连接要素
+toLevelFeatures(route); // 按层拆好的 FeatureCollection，室内地图按层渲染的直接输入
 ```
 
-连接要素只有首尾坐标属于楼层（首坐标进起点组、末坐标进终点组）；中间坐标（楼梯的踏步、折返平台）**不属于任何组**：不与楼层上的顶点合并、不参与修复，也不会被带 `group` 约束的途经点吸附上去。所以楼梯要在首尾两端接上楼层——端点与楼层顶点坐标一致，或靠 `tolerance` / `snapDangles` 在同层内接上。
+连接要素只有首尾坐标属于楼层（首坐标进起点组、末坐标进终点组）；中间坐标（楼梯的踏步、折返平台）**不属于任何组**：不与楼层上的顶点合并、不参与修复，也不会被带 `group` 约束的途经点吸附上去。所以楼梯要在首尾两端接上楼层——端点与楼层顶点坐标一致，或靠 `tolerance` / `snapDangles` 在同层内接上；接没接上用 `graph.diagnostics().connectorEnds` 查。
+
+配了 `levels` 还会自动启用**楼层感知的 A\* 下界**：30 层楼里一趟竖向行程的展开节点数实测从 883 降到 30。不配 `levels` 则一切照旧——楼层字段不出现，下界不启用，输出与 0.1.0 逐位相同。
+
+完整说明（数据建模、代价语义、按层渲染、性能边界与排错）见 **[docs/MULTI_LEVEL.md](docs/MULTI_LEVEL.md)**。
 
 ## Worker 与序列化
 
@@ -313,7 +335,7 @@ const finder = new LineFinder(graph);
 - 全部结构为扁平 TypedArray；查询复用 scratch 缓冲，只触碰访问到的节点。
 - 测试含：0.1.0 输出的金样本（默认配置逐位相同）、与朴素参考实现的随机差分、全程择优与"枚举全部候选组合"的暴力对拍、强连通分量与可达性的对拍、GPF 自带测试的全部断言，以及在 GPF 的 13.5 万坐标 OSM 单向路网上与独立裁判逐对比对。
 - CI 在 Node 20 / 22 上跑全部门禁（含体积门禁与公开 API 报告），在 Node 18 / 20 / 22 上直接加载构建产物并做 Worker 往返，并用 TypeScript 5.0 / 5.4 / 5.7 / 5.9 编译使用方代码；推送 `vX.Y.Z` tag 自动发布，见 [docs/RELEASE.md](docs/RELEASE.md)。
-- 实测数据与复现方法见 [docs/BENCHMARK.md](docs/BENCHMARK.md)；设计说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+- 实测数据与复现方法见 [docs/BENCHMARK.md](docs/BENCHMARK.md)；设计说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；多楼层专题见 [docs/MULTI_LEVEL.md](docs/MULTI_LEVEL.md)。
 
 ```bash
 pnpm test             # 单元 + 差分 + 对拍 + 金样本

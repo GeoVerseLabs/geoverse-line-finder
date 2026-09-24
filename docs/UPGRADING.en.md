@@ -1,6 +1,32 @@
-# Upgrading from 0.1.0 to 0.2.0
+# Upgrading
 
 🌐 [简体中文](UPGRADING.md) ｜ English
+
+## From 0.2.0 to the next release (multi-level)
+
+Networks that do not use `group` are unaffected: with default options the output is still bit-identical to 0.1.0. The changes below only concern connectivity groups, snap constraints and `connectors: 'legs'`.
+
+| Change                                                                         | Who is affected                                                      | What to do                                                                                                                                                                |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connector **interiors no longer belong to the start floor**                    | Code locating staircase steps with `mode: 'exact'` or `findVertex()` | Use the coordinates of the staircase's two ends; a step never belonged on a floor (it let the floor shortcut into the stairs)                                             |
+| A `group`-constrained snap **scans only that group**                           | Anyone relying on the old, broken crowding-out behaviour (unlikely)  | Normally a fix: three floors used to be enough for a false `SNAP_FAILED`. The result matches a full scan with the same constraint and no scan limit                       |
+| New failure detail `detail: 'SCAN_LIMIT'`                                      | TypeScript code with an exhaustive `switch` on `detail`              | Add a branch; it used to be reported as `FILTERED`                                                                                                                        |
+| Candidate `group` is `undefined` in the middle of a staircase                  | Code reading `candidate.group` to tell the floor                     | The middle of a staircase really is on no floor; select stairs with `featureIds` or `filter`                                                                              |
+| With `connectors: 'legs'`, `sections[].start/end` now shift with the connector | Code indexing `leg.path` with those values                           | This is a fix: they used to point at the wrong coordinates. `sections` / `transitions` / `levels` now all match `leg.path`                                                |
+| `GRAPH_FORMAT_VERSION` changed from `1` to `2`                                 | Code asserting `data.formatVersion === GRAPH_FORMAT_VERSION`         | Graphs without level semantics still write `1`; to test readability use the new `GRAPH_FORMAT_VERSIONS.includes(v)`                                                       |
+| `WeightContext` gains `fromGroup` / `toGroup` / `rise`                         | Tests that build a `WeightContext` literal by hand                   | Add the three fields; weight functions themselves are unaffected                                                                                                          |
+| `graph.features` grows when `verticalConnectors` is used                       | Code mapping `featureIndex` back to the input collection             | The synthesised features are appended after the input; `stats.verticalConnectors` counts them, and deserialising with the input features brings them back from the header |
+
+**To switch multi-level on** (none of it is required — without `levels` everything stays as it was):
+
+1. add `levels` with an `ordinal` (and optionally an `elevation`) for every floor group;
+2. make sure there is **no free way to change level** — give zero-length lifts a fixed positive cost, or the level bound degenerates to 0;
+3. run `graph.diagnostics()` once and read `connectorEnds` and `missingOrdinals`;
+4. declare lifts through `verticalConnectors` so the boarding cost is not charged per floor.
+
+See [Multi-level routing](MULTI_LEVEL.en.md).
+
+## Upgrading from 0.1.0 to 0.2.0
 
 ## Default options: unchanged output
 

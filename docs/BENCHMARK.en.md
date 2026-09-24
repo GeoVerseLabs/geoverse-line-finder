@@ -150,6 +150,34 @@ K = 4 costs about 2.0× nearest selection (limit ≤ 5×). Optimal selection wit
 - On the one-way network the gain comes mostly from "the nearest road runs the wrong way" — the general value of optimal selection, unrelated to warehouses.
 - In the two-way distance scenario the gain is small, and part of it is snap legs cutting corners in a straight line; that is why optimal selection with `costMode: 'none'` drifts towards distant candidates, and why `'ends'` / `'arrive-depart'` together with `maxRelocation` are recommended (ARCHITECTURE §5.5).
 
+### 5.6 Level-aware A\* bound (`--only levels`, 5 rounds)
+
+Synthetic building: 30 storeys, a 7 × 7 corridor grid per floor (5 m spacing, priced by length), two floor-by-floor lifts (4 per hop), 1 350 nodes in all, `perLevel` = 4.00. The trips go from F1 to the spot directly above on Fk, k = 2…30 — 29 queries.
+
+Settled nodes (`leg.settled`; deterministic, so one evaluation):
+
+| Trip                      | Dijkstra | A\* (plan bound only) | A\* + level bound | A\* + level + ALT(8) |
+| ------------------------- | -------- | --------------------- | ----------------- | -------------------- |
+| F1 → F5                   | 33       | 13                    | 5                 | 5                    |
+| F1 → F10                  | 186      | 84                    | 10                | 10                   |
+| F1 → F20                  | 632      | 433                   | 20                | 20                   |
+| F1 → F30                  | 1 082    | 883                   | 30                | 30                   |
+| F1 → F30, opposite corner | 1 351    | 1 345                 | 1 231             | 1 223                |
+
+Timings (the 29 trips together):
+
+| Engine                     | build ms       | all queries ms | per query µs p50 / p95 | weight mismatches |
+| -------------------------- | -------------- | -------------- | ---------------------- | ----------------- |
+| Dijkstra                   | 4.7 [3.9–5.3]  | 4.3 [3.9–5.4]  | 116 / 294              | 0                 |
+| A\* (plan bound only)      | 4.1 [3.6–5.1]  | 3.5 [2.6–6.9]  | 103 / 342              | 0                 |
+| A\* + level bound          | 4.3 [3.7–10.1] | 2.4 [2.0–3.4]  | 73 / 162               | 0                 |
+| A\* + level bound + ALT(8) | 7.9 [6.8–10.5] | 2.7 [2.3–3.8]  | 85 / 185               | 0                 |
+
+- The settled counts are the finding: on vertical trips the level bound brings the search down to about one node per storey, 883 → 30 for F1 → F30. RFC-0015's acceptance line was "at most 1/5 of A\*"; measured, it is 1/29.
+- Only the comparison with Dijkstra has non-overlapping timing ranges (2.0–3.4 vs 3.9–5.4 ms). Against plan-only A\* the ranges overlap, which at this scale (about 100 µs per search) is noise. The searches are too quick for wall-clock to show much; the gap would appear on larger buildings or in batch queries such as one-to-many and matrices.
+- **The last row is the limit**: when the target is also far away in plan there is almost nothing to gain. The cause is the plan term — on a Manhattan grid the straight-line bound falls about √2 short of the real walking distance, and that slack keeps most nodes looking like they are on a shortest path; ALT helps by about 1 %. This is A\*'s standing difficulty with grid networks, not something the level layer introduces.
+- A free lift or a group without an `ordinal` degenerates `perLevel` to 0, which is then exactly the plan-only case (see [MULTI_LEVEL.en.md](MULTI_LEVEL.en.md) §7.3).
+
 ## Reproducing
 
 - Do not run it alongside tests, builds or another benchmark; mind the power mode on laptops.
