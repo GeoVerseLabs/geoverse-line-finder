@@ -8,14 +8,20 @@
       name="description"
       content="Interactive playground for geoverse-line-finder: weighted shortest paths on GeoJSON line networks, running entirely in the browser."
     />
-    <script type="module" crossorigin src="./assets/index-DXSKvOqw.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-R285ze_w.css">
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 13 L6 5 L10 10 L14 3' fill='none' stroke='%232563eb' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <script type="module" crossorigin src="./assets/index-D6ou53tR.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-BKa1DRYN.css">
   </head>
   <body>
     <header class="site-header">
       <div class="site-header__title">
         <h1>geoverse-line-finder</h1>
-        <p>浏览器里跑的互动示例 · runs entirely in your browser, zero runtime dependencies</p>
+        <p>
+          浏览器里跑的互动示例 · runs entirely in your browser · 地理场景用 MapLibre GL JS + OpenFreeMap 底图
+        </p>
       </div>
       <nav class="site-header__links">
         <a href="https://github.com/GeoVerseLabs/geoverse-line-finder">GitHub</a>
@@ -32,6 +38,7 @@
     <main class="layout">
       <aside class="panel panel--controls">
         <p class="blurb" id="blurb"></p>
+        <p class="build-info" id="build-info"></p>
         <div class="option-group" id="options"></div>
         <div class="actions">
           <button id="clear" type="button">清空 · Clear</button>
@@ -43,6 +50,7 @@
       <section class="panel panel--map">
         <div class="floors" id="floors" hidden></div>
         <svg id="map" preserveAspectRatio="xMidYMid meet"></svg>
+        <div id="mapgl" class="mapgl" hidden></div>
         <p class="hint">点击地图添加途经点（≥ 2 个）· Click the map to add waypoints</p>
       </section>
 
