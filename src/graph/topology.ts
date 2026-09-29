@@ -81,6 +81,8 @@ export interface TopologyOptions {
   recordDiagnostics?: boolean;
   /** Extra segments injected after the network's own (vertical connectors); see {@link SyntheticSegment}. */
   synthetic?: readonly SyntheticSegment[];
+  /** Valid coordinates of the network ({@link NetworkScan.coordinates}); sizes the arrays up front. */
+  coordinates?: number;
 }
 
 /**
@@ -147,16 +149,23 @@ export function buildTopology(
   metric: Metric,
   options: TopologyOptions,
 ): Topology {
+  const synthetic = options.synthetic;
+  const syntheticCount = synthetic ? synthetic.length : 0;
+  const coordinateCount = options.coordinates ?? scanNetwork(network).coordinates;
   const store = new VertexStore({
     tolerance: options.tolerance,
     geographic: metric.geographic,
     maxAbsLat: options.maxAbsLat,
+    capacity: coordinateCount + 2 * syntheticCount,
   });
-  const segA: number[] = [];
-  const segB: number[] = [];
-  const segF: number[] = [];
-  const segP: number[] = [];
-  const segS: number[] = [];
+  // Every valid coordinate adds at most one segment, every synthetic link exactly one.
+  const capacity = coordinateCount + syntheticCount;
+  const segA = new Int32Array(capacity);
+  const segB = new Int32Array(capacity);
+  const segF = new Int32Array(capacity);
+  const segP = new Int32Array(capacity);
+  const segS = new Int32Array(capacity);
+  let S = 0;
   let lineFeatures = 0;
   let skippedFeatures = 0;
   let invalidCoordinates = 0;
@@ -249,11 +258,11 @@ export function buildTopology(
               : store.append(c[0], c[1], c, NO_GROUP);
           if (repairs && id !== prev) vertexFeature.push(fi);
           if (prev !== -1 && id !== prev) {
-            segA.push(prev);
-            segB.push(id);
-            segF.push(fi);
-            segP.push(pi);
-            segS.push(-1);
+            segA[S] = prev;
+            segB[S] = id;
+            segF[S] = fi;
+            segP[S] = pi;
+            segS[S++] = -1;
           }
           prev = id;
           prevPos = c;
@@ -268,11 +277,11 @@ export function buildTopology(
           }
         }
         if (prev !== -1 && id !== prev) {
-          segA.push(prev);
-          segB.push(id);
-          segF.push(fi);
-          segP.push(pi);
-          segS.push(-1);
+          segA[S] = prev;
+          segB[S] = id;
+          segF[S] = fi;
+          segP[S] = pi;
+          segS[S++] = -1;
         }
         prev = id;
         prevPos = c;
@@ -282,30 +291,45 @@ export function buildTopology(
 
   // Vertical connectors: a stop joins the level it serves exactly like a digitised end coordinate, so
   // merging, `tolerance` and `snapDangles` attach it to the floor network in the usual way.
-  const synthetic = options.synthetic;
-  if (synthetic) {
-    for (let i = 0; i < synthetic.length; i++) {
-      const link = synthetic[i];
-      const a = store.getOrAdd(link.from, groupOf(link.fromGroup));
-      const b = store.getOrAdd(link.to, groupOf(link.toGroup));
-      if (a === b) continue;
-      segA.push(a);
-      segB.push(b);
-      segF.push(link.featureIndex);
-      segP.push(link.part);
-      segS.push(i);
-    }
+  for (let i = 0; i < syntheticCount; i++) {
+    const link = synthetic![i];
+    const a = store.getOrAdd(link.from, groupOf(link.fromGroup));
+    const b = store.getOrAdd(link.to, groupOf(link.toGroup));
+    if (a === b) continue;
+    segA[S] = a;
+    segB[S] = b;
+    segF[S] = link.featureIndex;
+    segP[S] = link.part;
+    segS[S++] = i;
   }
 
   const mergedVertices = store.merged;
-  const repair = new ConnectivityRepair(store, segA, segB, segF, metric, options.tolerance, repairs);
-  const danglesSnapped = options.snapDangles > 0 ? repair.snapDangles(options.snapDangles) : 0;
-  const intersectionsSplit = options.splitIntersections ? repair.splitIntersections() : 0;
-  const result = repair.apply(segP, segS);
+  let danglesSnapped = 0;
+  let intersectionsSplit = 0;
+  let result: SegmentArrays;
+  let remap: Int32Array;
+  if (options.snapDangles > 0 || options.splitIntersections) {
+    const repair = new ConnectivityRepair(store, S, segA, segB, segF, metric, options.tolerance, repairs);
+    if (options.snapDangles > 0) danglesSnapped = repair.snapDangles(options.snapDangles);
+    if (options.splitIntersections) intersectionsSplit = repair.splitIntersections();
+    result = repair.apply(segP, segS);
+    remap = repair.remapTable();
+  } else {
+    // Nothing merges after the fact: every vertex is its own final vertex and no segment collapses.
+    result = {
+      a: segA.subarray(0, S),
+      b: segB.subarray(0, S),
+      f: segF.subarray(0, S),
+      p: segP.subarray(0, S),
+      s: segS.subarray(0, S),
+    };
+    remap = new Int32Array(store.size);
+    for (let v = 0; v < remap.length; v++) remap[v] = v;
+  }
 
   return {
     store,
-    remap: repair.remapTable(),
+    remap,
     segA: result.a,
     segB: result.b,
     segFeature: result.f,
@@ -343,6 +367,14 @@ function logRepair(
 
 const PARAM_EPS = 1e-9;
 
+interface SegmentArrays {
+  a: Int32Array;
+  b: Int32Array;
+  f: Int32Array;
+  p: Int32Array;
+  s: Int32Array;
+}
+
 /**
  * Topology repair on the raw segment soup. Merges are recorded in a union-find and splits as
  * `(t, vertex)` requests per segment; both are applied at once by {@link apply}, so every detection
@@ -350,21 +382,28 @@ const PARAM_EPS = 1e-9;
  * the group-less interior of connectors.
  */
 class ConnectivityRepair {
-  private readonly parent: number[] = [];
+  private parent: Int32Array;
   private readonly splits = new Map<number, number[]>();
+  private splitCount = 0;
   private readonly grouped: boolean;
 
+  /** Segments `[0, count)` of the arrays are the network; the arrays may be longer. */
   constructor(
     private readonly store: VertexStore,
-    private readonly segA: number[],
-    private readonly segB: number[],
-    private readonly segF: number[],
+    private readonly count: number,
+    private readonly segA: Int32Array,
+    private readonly segB: Int32Array,
+    private readonly segF: Int32Array,
     private readonly metric: Metric,
     private readonly tolerance: number,
     private readonly log: RepairLog | null,
   ) {
-    for (let i = 0; i < store.size; i++) this.parent.push(i);
-    this.grouped = store.group.some((g) => g !== 0);
+    const V = store.size;
+    this.parent = new Int32Array(Math.max(16, V + (V >> 2)));
+    for (let i = 0; i < this.parent.length; i++) this.parent[i] = i;
+    let grouped = false;
+    for (let v = 0; v < V && !grouped; v++) grouped = store.group[v] !== 0;
+    this.grouped = grouped;
   }
 
   find(v: number): number {
@@ -387,7 +426,12 @@ class ConnectivityRepair {
 
   private addVertex(x: number, y: number, group: number): number {
     const id = this.store.getOrAdd([x, y], group);
-    while (this.parent.length < this.store.size) this.parent.push(this.parent.length);
+    if (id >= this.parent.length) {
+      const parent = new Int32Array(this.parent.length * 2);
+      parent.set(this.parent);
+      for (let i = this.parent.length; i < parent.length; i++) parent[i] = i;
+      this.parent = parent;
+    }
     return this.find(id);
   }
 
@@ -398,13 +442,14 @@ class ConnectivityRepair {
       this.splits.set(segment, list);
     }
     list.push(t, vertex);
+    this.splitCount++;
   }
 
   private segmentTree(): PackedRTree {
     const X = this.store.x;
     const Y = this.store.y;
-    const tree = new PackedRTree(this.segA.length);
-    for (let s = 0; s < this.segA.length; s++) {
+    const tree = new PackedRTree(this.count);
+    for (let s = 0; s < this.count; s++) {
       const a = this.find(this.segA[s]);
       const b = this.find(this.segB[s]);
       tree.add(Math.min(X[a], X[b]), Math.min(Y[a], Y[b]), Math.max(X[a], X[b]), Math.max(Y[a], Y[b]));
@@ -419,19 +464,20 @@ class ConnectivityRepair {
    * only neighbour are ignored, otherwise short spurs would fold back onto their own line.
    */
   snapDangles(maxDistance: number): number {
-    const { segA, segB, segF, metric, grouped } = this;
+    const { segA, segB, segF, metric, grouped, count: S } = this;
+    // Only vertices that exist now are read through these (see VertexStore.x).
     const X = this.store.x;
     const Y = this.store.y;
     const G = this.store.group;
     const V = this.store.size;
     const degree = new Int32Array(V);
-    for (let s = 0; s < segA.length; s++) {
+    for (let s = 0; s < S; s++) {
       degree[segA[s]]++;
       degree[segB[s]]++;
     }
     const neighbour = new Int32Array(V).fill(-1);
     const ownSegment = new Int32Array(V).fill(-1);
-    for (let s = 0; s < segA.length; s++) {
+    for (let s = 0; s < S; s++) {
       if (degree[segA[s]] === 1) {
         neighbour[segA[s]] = segB[s];
         ownSegment[segA[s]] = s;
@@ -509,7 +555,9 @@ class ConnectivityRepair {
    * bridges and tunnels to whatever they pass over (put them in separate groups to prevent that).
    */
   splitIntersections(): number {
-    const { segA, segB, segF, grouped } = this;
+    const { segA, segB, segF, grouped, count: S } = this;
+    // Split points created below are never read through these: they only become split requests, and no
+    // existing vertex is merged into one of them in this pass (see VertexStore.x).
     const X = this.store.x;
     const Y = this.store.y;
     const G = this.store.group;
@@ -517,7 +565,7 @@ class ConnectivityRepair {
     const hit: SegmentIntersection = { t: 0, u: 0 };
     let count = 0;
 
-    for (let i = 0; i < segA.length; i++) {
+    for (let i = 0; i < S; i++) {
       const a1 = this.find(segA[i]);
       const a2 = this.find(segB[i]);
       if (a1 === a2) continue;
@@ -574,28 +622,28 @@ class ConnectivityRepair {
    * Applies merges and splits, returning the final segment arrays. Segments keep their input order and the
    * pieces of a split segment follow its direction, so each feature part stays contiguous and ordered.
    */
-  apply(
-    part: number[],
-    synthetic: number[],
-  ): { a: Int32Array; b: Int32Array; f: Int32Array; p: Int32Array; s: Int32Array } {
-    const outA: number[] = [];
-    const outB: number[] = [];
-    const outF: number[] = [];
-    const outP: number[] = [];
-    const outS: number[] = [];
-    const segF = this.segF;
-    for (let s = 0; s < this.segA.length; s++) {
+  apply(part: Int32Array, synthetic: Int32Array): SegmentArrays {
+    // A segment with k split requests becomes at most k + 1 pieces.
+    const capacity = this.count + this.splitCount;
+    const outA = new Int32Array(capacity);
+    const outB = new Int32Array(capacity);
+    const outF = new Int32Array(capacity);
+    const outP = new Int32Array(capacity);
+    const outS = new Int32Array(capacity);
+    let n = 0;
+    const emit = (from: number, to: number, s: number) => {
+      outA[n] = from;
+      outB[n] = to;
+      outF[n] = this.segF[s];
+      outP[n] = part[s];
+      outS[n++] = synthetic[s];
+    };
+    for (let s = 0; s < this.count; s++) {
       const a = this.find(this.segA[s]);
       const b = this.find(this.segB[s]);
       const list = this.splits.get(s);
       if (!list) {
-        if (a !== b) {
-          outA.push(a);
-          outB.push(b);
-          outF.push(segF[s]);
-          outP.push(part[s]);
-          outS.push(synthetic[s]);
-        }
+        if (a !== b) emit(a, b, s);
         continue;
       }
       const pairs: [number, number][] = [];
@@ -605,28 +653,18 @@ class ConnectivityRepair {
       for (const [, vertex] of pairs) {
         const w = this.find(vertex);
         if (w !== prev) {
-          outA.push(prev);
-          outB.push(w);
-          outF.push(segF[s]);
-          outP.push(part[s]);
-          outS.push(synthetic[s]);
+          emit(prev, w, s);
           prev = w;
         }
       }
-      if (b !== prev) {
-        outA.push(prev);
-        outB.push(b);
-        outF.push(segF[s]);
-        outP.push(part[s]);
-        outS.push(synthetic[s]);
-      }
+      if (b !== prev) emit(prev, b, s);
     }
     return {
-      a: Int32Array.from(outA),
-      b: Int32Array.from(outB),
-      f: Int32Array.from(outF),
-      p: Int32Array.from(outP),
-      s: Int32Array.from(outS),
+      a: outA.subarray(0, n),
+      b: outB.subarray(0, n),
+      f: outF.subarray(0, n),
+      p: outP.subarray(0, n),
+      s: outS.subarray(0, n),
     };
   }
 

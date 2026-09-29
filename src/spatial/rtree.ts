@@ -104,9 +104,7 @@ export class PackedRTree {
       const y = Math.floor((hilbertMax * ((boxes[p + 1] + boxes[p + 3]) / 2 - this.minY)) / height);
       hilbertValues[i] = hilbert(x, y);
     }
-    const order = new Uint32Array(n);
-    for (let i = 0; i < n; i++) order[i] = i;
-    order.sort((a, b) => hilbertValues[a] - hilbertValues[b] || a - b);
+    const order = sortByKey(hilbertValues);
     const sortedBoxes = new Float64Array(n * 4);
     const sortedIndices = new Uint32Array(n);
     for (let k = 0; k < n; k++) {
@@ -217,6 +215,39 @@ export class PackedRTree {
       }
     }
   }
+}
+
+/**
+ * Item indices ordered by `keys`, ties by index: a least-significant-digit radix sort, 8 bits per pass. It is
+ * stable, so starting from index order it yields exactly the (key, index) order of a comparison sort, without
+ * a comparator call per comparison. Passes in which every key has the same digit are skipped.
+ */
+function sortByKey(keys: Uint32Array): Uint32Array {
+  const n = keys.length;
+  let order = new Uint32Array(n);
+  let value = keys.slice();
+  for (let i = 0; i < n; i++) order[i] = i;
+  let nextOrder = new Uint32Array(n);
+  let nextValue = new Uint32Array(n);
+  const start = new Int32Array(256);
+  for (let shift = 0; shift < 32; shift += 8) {
+    start.fill(0);
+    for (let i = 0; i < n; i++) start[(value[i] >>> shift) & 255]++;
+    if (start[(value[0] >>> shift) & 255] === n) continue;
+    for (let d = 0, sum = 0; d < 256; d++) {
+      const c = start[d];
+      start[d] = sum;
+      sum += c;
+    }
+    for (let i = 0; i < n; i++) {
+      const k = start[(value[i] >>> shift) & 255]++;
+      nextOrder[k] = order[i];
+      nextValue[k] = value[i];
+    }
+    [order, nextOrder] = [nextOrder, order];
+    [value, nextValue] = [nextValue, value];
+  }
+  return order;
 }
 
 function axisDistance(k: number, min: number, max: number): number {

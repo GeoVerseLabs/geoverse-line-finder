@@ -1,17 +1,17 @@
-/** Raw output of {@link buildChains}: plain arrays, converted to typed arrays by the graph builder. */
+/** Output of {@link buildChains}; every array has its exact final length. */
 export interface ChainBuild {
   count: number;
   /** Start / end vertex id of every chain. */
-  from: number[];
-  to: number[];
+  from: Int32Array;
+  to: Int32Array;
   /** Chain `c` owns chain-ordered segment slots `[segStart[c], segStart[c + 1])`. */
-  segStart: number[];
+  segStart: Int32Array;
   /** Topology segment id per slot. */
-  segRef: number[];
+  segRef: Int32Array;
   /** 1 when the slot traverses its segment against the digitised direction. */
-  segRev: number[];
+  segRev: Uint8Array;
   /** Vertices along every chain; chain `c` occupies `[segStart[c] + c, segStart[c + 1] + c]`. */
-  vertices: number[];
+  vertices: Int32Array;
   /** 1 for vertices that became graph nodes. */
   junction: Uint8Array;
 }
@@ -33,10 +33,12 @@ export function buildChains(
   const V = vertexCount;
   const S = segA.length;
   const degree = new Int32Array(V);
+  let live = 0;
   for (let s = 0; s < S; s++) {
     if (!alive[s]) continue;
     degree[segA[s]]++;
     degree[segB[s]]++;
+    live++;
   }
   const incOffset = new Int32Array(V + 1);
   for (let v = 0; v < V; v++) incOffset[v + 1] = incOffset[v] + degree[v];
@@ -53,30 +55,31 @@ export function buildChains(
     if (degree[v] > 0 && (!compact || degree[v] !== 2)) junction[v] = 1;
   }
 
-  const used = new Uint8Array(S);
-  const out: ChainBuild = {
-    count: 0,
-    from: [],
-    to: [],
-    segStart: [0],
-    segRef: [],
-    segRev: [],
-    vertices: [],
-    junction,
-  };
+  // Every live segment lands in exactly one chain, and a chain holds at least one segment.
+  const from = new Int32Array(live);
+  const to = new Int32Array(live);
+  const segStart = new Int32Array(live + 1);
+  const segRef = new Int32Array(live);
+  const segRev = new Uint8Array(live);
+  const vertices = new Int32Array(2 * live);
+  let count = 0;
+  let slots = 0;
+  let vertexCursor = 0;
 
+  const used = new Uint8Array(S);
   const walk = (start: number, firstSegment: number): void => {
-    out.from.push(start);
-    out.vertices.push(start);
+    from[count] = start;
+    vertices[vertexCursor++] = start;
     let v = start;
     let s = firstSegment;
+    let next: number;
     for (;;) {
       used[s] = 1;
       const rev = segA[s] === v ? 0 : 1;
-      const next = rev ? segA[s] : segB[s];
-      out.segRef.push(s);
-      out.segRev.push(rev);
-      out.vertices.push(next);
+      next = rev ? segA[s] : segB[s];
+      segRef[slots] = s;
+      segRev[slots++] = rev;
+      vertices[vertexCursor++] = next;
       if (junction[next]) break;
       const o = incOffset[next];
       const other = incident[o] === s ? incident[o + 1] : incident[o];
@@ -88,9 +91,8 @@ export function buildChains(
       v = next;
       s = other;
     }
-    out.to.push(out.vertices[out.vertices.length - 1]);
-    out.segStart.push(out.segRef.length);
-    out.count++;
+    to[count++] = next;
+    segStart[count] = slots;
   };
 
   for (let v = 0; v < V; v++) {
@@ -106,5 +108,14 @@ export function buildChains(
       walk(segA[s], s);
     }
   }
-  return out;
+  return {
+    count,
+    from: from.slice(0, count),
+    to: to.slice(0, count),
+    segStart: segStart.slice(0, count + 1),
+    segRef,
+    segRev,
+    vertices: vertices.slice(0, vertexCursor),
+    junction,
+  };
 }

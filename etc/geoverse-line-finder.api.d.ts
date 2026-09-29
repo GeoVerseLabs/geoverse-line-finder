@@ -4,46 +4,87 @@ interface VertexStoreOptions {
     geographic: boolean;
     /** Largest |latitude| in the network; sizes the longitude cells so no neighbour is ever missed. */
     maxAbsLat: number;
+    /** Expected number of vertices (the arrays grow past it when needed). */
+    capacity?: number;
 }
 /**
  * Deduplicates network coordinates into vertex ids.
  *
- * Exact mode uses a nested `Map<x, Map<y, id>>` (no string keys — the trick that makes terra-route's
- * build fast). Tolerance mode uses a uniform grid whose cells are at least `tolerance` wide and checks the
- * 3×3 neighbourhood with a real distance, unlike geojson-path-finder's coordinate rounding, which fails to
- * merge two points that straddle a rounding boundary however close they are.
+ * One open-addressing hash table over flat typed arrays (no string keys, no nested maps). Exact mode keys it
+ * by the coordinates; tolerance mode by grid cells at least `tolerance` wide, each the head of a list of its
+ * vertices, and checks the 3×3 neighbourhood with a real distance — unlike geojson-path-finder's coordinate
+ * rounding, which fails to merge two points that straddle a rounding boundary however close they are.
  *
  * Vertices live in connectivity groups (`0` unless the graph uses `group`): only vertices of the same group
- * ever merge, so stacked floors or a bridge above a road stay apart.
+ * ever merge, so stacked floors or a bridge above a road stay apart. The first vertex at a location owns it:
+ * lookups return it, whatever else is appended there later.
  */
 declare class VertexStore {
-    readonly x: number[];
-    readonly y: number[];
+    /**
+     * Coordinates and group of every vertex; only the first {@link size} entries are meaningful. Entries never
+     * change once appended and growing copies them, so an array read earlier still holds every vertex that
+     * existed at that time.
+     */
+    x: Float64Array;
+    y: Float64Array;
+    group: Int32Array;
     /** Original coordinate objects, kept for faithful output (including any z value). */
     readonly positions: Position[];
-    /** Group index of every vertex. */
-    readonly group: number[];
     /** Number of coordinates that were merged into an already known vertex. */
     merged: number;
     /** Distance to the vertex matched by the last successful {@link find} (`0` for identical coordinates). */
     lastDistance: number;
+    private count;
     private readonly tolerance;
     private readonly geographic;
-    private readonly exact;
-    private readonly grid;
+    /** Grid cell size (tolerance mode). */
     private readonly cellX;
     private readonly cellY;
-    constructor(options: VertexStoreOptions);
+    /**
+     * The hash table. Slot `s` is in use when bit `s` of `used` is set; its key is `keys[3s..3s+2]` (coordinates
+     * or cell, and group) and `head[s]` is the vertex that owns the location (exact mode) or the first vertex
+     * of the cell, the others following through `next` (tolerance mode).
+     */
+    private used;
+    private keys;
+    private head;
+    private next;
+    private mask;
+    private entries;
+    constructor(options: VertexStoreOptions, arrays?: {
+        x: Float64Array;
+        y: Float64Array;
+        group: Int32Array;
+    });
+    /**
+     * A store over existing vertex arrays (a deserialised graph). The arrays are used, not copied, and
+     * indexed in vertex order, so every location is owned by the same vertex as in the store that built them.
+     */
+    static fromArrays(options: VertexStoreOptions, x: Float64Array, y: Float64Array, group: Int32Array | null, positions: readonly Position[]): VertexStore;
     get size(): number;
     /** Returns the id of the vertex at (or within tolerance of) `position`, creating it when absent. */
     getOrAdd(position: Position, group?: number): number;
-    /** Looks a coordinate up without inserting; `-1` when no vertex of `group` matches. */
+    /**
+     * Looks a coordinate up without inserting; `-1` when no vertex of `group` matches.
+     */
     find(px: number, py: number, group?: number): number;
     /**
      * Adds a vertex unconditionally (split points computed during connectivity repair). A {@link NO_GROUP}
      * vertex is not indexed, so {@link find} never returns it and nothing merges into it.
      */
     append(px: number, py: number, position: Position, group?: number): number;
+    /**
+     * Cuts the arrays down to {@link size}, so that a finished graph can share them.
+     */
+    trim(): void;
+    private push;
+    /** Indexes vertex `id` (already pushed) unless it is group-less or, in exact mode, its location is owned. */
+    private index;
+    private inUse;
+    /** The slot holding key `(a, b, group)`, or the free slot where it belongs. */
+    private probe;
+    /** Takes a free slot for a key, keeping the table at most half full. */
+    private claim;
 }
 
 /** A connectivity group key. */

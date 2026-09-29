@@ -256,6 +256,7 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
     group: options.group as GroupFunction<unknown> | undefined,
     recordDiagnostics: options.diagnostics === true,
     synthetic: resolved ? resolved.segments : undefined,
+    coordinates: scan.coordinates,
   });
 
   const features: readonly NetworkFeature<P>[] = resolved
@@ -352,6 +353,9 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
 
   // --- weights -------------------------------------------------------------------------------------
   const weight = options.weight ?? (distanceWeight as WeightFunction<P>);
+  // The default weight is the length itself: skip the call and its context object (what normalizeWeight
+  // would make of a length: itself, or impassable / free when it is 0).
+  const byLength = weight === (distanceWeight as WeightFunction<P>);
   const zeroIsFree = zeroWeight === 'free';
   const norm: NormalizedWeight = { forward: 0, backward: 0 };
   const grouped = topo.groupKeys.length > 1;
@@ -369,6 +373,9 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
       // Vertical connectors carry their own budgeted cost; the weight function never sees them.
       norm.forward = link.forward;
       norm.backward = link.backward;
+    } else if (byLength) {
+      const d = segLen[s];
+      norm.forward = norm.backward = d > 0 && d < Infinity ? d : d === 0 && zeroIsFree ? 0 : Infinity;
     } else {
       const a = topo.segA[s];
       const b = topo.segB[s];
@@ -421,22 +428,22 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   const compact = options.compact !== false;
   const built = buildChains(V, topo.segA, topo.segB, alive, compact);
   const vertexNode = new Int32Array(V).fill(-1);
-  const nodeVertexList: number[] = [];
-  for (let v = 0; v < V; v++) {
+  let N = 0;
+  for (let v = 0; v < V; v++) if (built.junction[v]) N++;
+  const nodeVertex = new Int32Array(N);
+  for (let v = 0, n = 0; v < V; v++) {
     if (built.junction[v]) {
-      vertexNode[v] = nodeVertexList.length;
-      nodeVertexList.push(v);
+      vertexNode[v] = n;
+      nodeVertex[n++] = v;
     }
   }
-  const N = nodeVertexList.length;
-  const nodeVertex = Int32Array.from(nodeVertexList);
 
   const C = built.count;
   const K = built.segRef.length;
   const chainFrom = new Int32Array(C);
   const chainTo = new Int32Array(C);
-  const segStart = Int32Array.from(built.segStart);
-  const chainVertices = Int32Array.from(built.vertices);
+  const segStart = built.segStart;
+  const chainVertices = built.vertices;
   const chainFwd = new Float64Array(C);
   const chainBwd = new Float64Array(C);
   const chainLen = new Float64Array(C);
@@ -627,8 +634,10 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   }
 
   // --- spatial index over chain segments -----------------------------------------------------------
-  const vx = Float64Array.from(store.x);
-  const vy = Float64Array.from(store.y);
+  // The store is complete: the graph shares its (trimmed) arrays instead of copying them.
+  store.trim();
+  const vx = store.x;
+  const vy = store.y;
   const segmentIndex = new PackedRTree(K);
   for (let k = 0; k < K; k++) {
     const c = sChain[k];
@@ -681,7 +690,7 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
       node: vertexNode,
       chain: vertexChain,
       chainPos: vertexChainPos,
-      group: grouped ? Int32Array.from(store.group) : null,
+      group: grouped ? store.group : null,
       elevation: vertexElevation,
     },
     nodes: { count: N, vertex: nodeVertex, component: nodeComponent, embedding },

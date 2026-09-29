@@ -218,18 +218,22 @@ export function graphFromTransferable<P = unknown>(
   const x = get<Float64Array>('vertices.x');
   const y = get<Float64Array>('vertices.y');
   const group = arrays.has('vertices.group') ? get<Int32Array>('vertices.group') : null;
-  const store = new VertexStore({
-    tolerance: header.settings.tolerance,
-    geographic: metric.geographic,
-    maxAbsLat: header.settings.maxAbsLat,
-  });
   const positions: Position[] = [];
   for (let v = 0; v < V; v++) {
     const z = raw[3 * v + 2];
-    const p = Number.isNaN(z) ? [raw[3 * v], raw[3 * v + 1]] : [raw[3 * v], raw[3 * v + 1], z];
-    positions.push(p);
-    store.append(x[v], y[v], p, group ? group[v] : 0);
+    positions.push(Number.isNaN(z) ? [raw[3 * v], raw[3 * v + 1]] : [raw[3 * v], raw[3 * v + 1], z]);
   }
+  const store = VertexStore.fromArrays(
+    {
+      tolerance: header.settings.tolerance,
+      geographic: metric.geographic,
+      maxAbsLat: header.settings.maxAbsLat,
+    },
+    x,
+    y,
+    group,
+    positions,
+  );
 
   // Synthesised connector features travel in the header, so a worker can pass the input collection alone.
   const synthetic = (header.synthetic ?? []) as NetworkFeature<P>[];
