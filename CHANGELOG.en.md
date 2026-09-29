@@ -44,7 +44,8 @@ The full story is in [docs/MULTI_LEVEL.en.md](docs/MULTI_LEVEL.en.md). The engin
 - **`output: { z: 'elevation' }` route option**: writes the height into the third coordinate (`path` then holds copies).
 - **Level diagnostics**: `connectorEnds` (a connector end that never joined its floor), `levelReachability` (which components each level lies in and which levels it reaches), `missingOrdinals` (groups without an ordinal, which switch the level bound off).
 - **Serialisation format 2**: graphs with `levels` or `verticalConnectors` are written as `formatVersion: 2` (three extra buffers for level ordinals, level elevations and per-vertex elevations, with level names and the synthesised features in the header); everything else still writes 1. Readers accept both, and an older build fails loudly on 2. Deserialising needs only the input features — the synthesised connector features come back from the header.
-- The playground gains a **multi-level** scenario: floor switching, per-level drawing and clickable passage markers.
+- The playground gains a **multi-level** scenario: floor switching, per-level drawing and clickable passage markers; its lift is a point feature turned into a vertical connector by `pointConnector`.
+- The playground gets a map engine: longitude / latitude scenarios now use **MapLibre GL JS on an OpenFreeMap basemap** (loaded on demand, falling back to a plain background when the basemap is unreachable), and a new **Gothenburg OSM network (135k coordinates)** scenario builds its graph in the browser and shows how long that took, with driving (`createSpeedWeight` + `osmDirection`) and walking profiles each building their own graph. Planar scenarios keep the SVG canvas.
 
 ### Fixed
 

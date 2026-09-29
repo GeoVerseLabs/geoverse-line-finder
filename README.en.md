@@ -17,7 +17,7 @@ A zero-dependency TypeScript library for shortest paths on GeoJSON line networks
 
 The routing core follows [terra-route](https://github.com/JamesLMilner/terra-route) (CSR adjacency, 4-ary heap, reusable scratch buffers); the weight configuration follows [geojson-path-finder](https://github.com/perliedman/geojson-path-finder). Works in browsers, Web Workers and Node.
 
-**🗺️ [Live demo](https://GeoVerseLabs.github.io/geoverse-line-finder/)** — click the map to place waypoints and watch candidate constraints, optimal selection (nearest vs. optimal overlaid), failure policies (skip / straight) and topology diagnostics update live. Source in [`examples/playground/`](examples/playground/); run it locally with `pnpm demo:dev`.
+**🗺️ [Live demo](https://GeoVerseLabs.github.io/geoverse-line-finder/)** — click the map to place waypoints and watch candidate constraints, optimal selection (nearest vs. optimal overlaid), failure policies (skip / straight), multiple levels and topology diagnostics update live. Real networks sit on a MapLibre + OpenFreeMap basemap, and Gothenburg's 135k-coordinate OSM network is built right in the browser (driving and walking profiles). Source in [`examples/playground/`](examples/playground/); run it locally with `pnpm demo:dev`.
 
 ## Install
 
