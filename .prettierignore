@@ -5,3 +5,4 @@ pnpm-lock.yaml
 bench/results
 test/fixtures
 etc
+examples/playground/public/data/gothenburg.json

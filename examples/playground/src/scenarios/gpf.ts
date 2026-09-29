@@ -15,15 +15,15 @@ async function load(): Promise<NetworkCollection<RoadProps>> {
 export const gpfScenario: Scenario<RoadProps> = {
   id: 'gpf',
   title: '真实路网 · 线段吸附与诊断',
+  view: 'map',
   blurb:
-    '挪威一小片真实路网（geojson-path-finder 自带测试数据，44 条线，经纬度坐标）。默认线段吸附（edge snap）' +
+    '挪威一小片真实路网（geojson-path-finder 自带测试数据，44 条线，经纬度坐标），叠在 OpenFreeMap 底图上。默认线段吸附（edge snap）' +
     '让途经点可以落在线段中间，不必是已有顶点。点两下地图看路线；"运行诊断"调用 graph.diagnostics() 列出' +
-    '未接通的端点（悬挂端点，红色 ×）——这是 0.2.0 的 R7。',
+    '未接通的端点（悬挂端点，红圈）——这是 0.2.0 的 R7。',
   network: load,
   graphOptions: { diagnostics: true },
   defaultRouteOptions: { sectionsDetail: 'measure' },
-  styleOf: () => ({ stroke: '#475569', width: 2.5, opacity: 0.8 }),
-  latScale: Math.cos((59.5 * Math.PI) / 180),
+  styleOf: () => ({ stroke: '#475569', width: 3, opacity: 0.85 }),
   features: { diagnostics: true, measures: true },
   presets: [
     {

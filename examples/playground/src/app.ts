@@ -13,21 +13,9 @@ import {
   type SnapMode,
   type SnappedWaypoint,
 } from '../../../src';
-import { boundsOf, fitProjector, inverseFitProjector, type Projector } from './lib/project';
-import {
-  clearSvg,
-  renderCandidates,
-  renderDangles,
-  renderNetwork,
-  renderRoutes,
-  renderTransitions,
-  renderWaypoints,
-} from './lib/svg';
-import { scenarios, type Scenario } from './scenarios';
-
-const VIEW_W = 900;
-const VIEW_H = 620;
-const PADDING = 30;
+import { SvgView } from './lib/svg-view';
+import type { CandidateMark, MapView, Overlay, RouteLine } from './lib/view';
+import { scenarios, type Scenario, type ScenarioProfile } from './scenarios';
 
 interface UiState {
   algorithm: 'astar' | 'dijkstra';
@@ -38,6 +26,8 @@ interface UiState {
   featureConstraint: boolean;
   /** Multi-level scenarios: the floor shown on the map, which new waypoints are placed on. */
   floor?: GroupKey;
+  /** Scenarios with profiles: the one whose graph is built. */
+  profile?: string;
 }
 
 const state: UiState = {
@@ -52,14 +42,41 @@ const state: UiState = {
 let scenario: Scenario<unknown> = scenarios[0];
 let network: NetworkCollection<unknown> | null = null;
 let finder: LineFinder<unknown> | null = null;
-let projector: Projector | null = null;
-let toData: ((svg: [number, number]) => Position) | null = null;
 let waypoints: Position[] = [];
 let waypointFeatureIds: (string[] | undefined)[] = [];
 let waypointLevels: (GroupKey | undefined)[] = [];
+/** The overlay last drawn, so that the diagnostics can add their markers to it. */
+let overlay: Overlay = {};
 
 const $ = <T extends Element>(id: string): T => document.getElementById(id) as unknown as T;
-const svg = $<SVGSVGElement>('map');
+
+// --------------------------------------------------------------------------------------------- views
+
+const svgView = new SvgView($<SVGSVGElement>('map'));
+svgView.onClick(addWaypoint);
+let mapView: Promise<MapView> | null = null;
+
+/** MapLibre (and its styles) load only when a map scenario is opened. */
+function loadMapView(): Promise<MapView> {
+  mapView ??= import('./lib/maplibre-view').then(({ MapLibreView }) => {
+    const view = new MapLibreView(
+      $<HTMLElement>('mapgl'),
+      '路网数据 © <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> 贡献者（ODbL）',
+    );
+    view.onClick(addWaypoint);
+    return view;
+  });
+  return mapView;
+}
+
+let view: MapView = svgView;
+
+async function useView(kind: 'svg' | 'map'): Promise<void> {
+  const next = kind === 'map' ? await loadMapView() : svgView;
+  if (next !== view) view.hide();
+  view = next;
+  view.show();
+}
 
 // ---------------------------------------------------------------------------------------------- tabs
 
@@ -95,6 +112,7 @@ function renderFloors(): void {
     btn.addEventListener('click', () => {
       state.floor = floor.key;
       renderFloors();
+      drawNetwork(false);
       void recompute();
     });
     el.appendChild(btn);
@@ -107,10 +125,24 @@ function renderFloors(): void {
 
 // -------------------------------------------------------------------------------------------- options
 
+function currentProfile(): ScenarioProfile<unknown> | undefined {
+  return scenario.profiles?.find((p) => p.id === state.profile) ?? scenario.profiles?.[0];
+}
+
 function renderOptions(): void {
   const el = $<HTMLElement>('options');
   const f = scenario.features;
   const parts: string[] = [];
+  if (scenario.profiles) {
+    parts.push(
+      optionSelect(
+        'profile',
+        '出行方式 · 一个剖面一张图',
+        currentProfile()!.id,
+        scenario.profiles.map((p) => [p.id, p.label]),
+      ),
+    );
+  }
   parts.push(
     optionSelect('algorithm', '引擎 · algorithm', state.algorithm, [
       ['astar', 'A*'],
@@ -159,6 +191,12 @@ function renderOptions(): void {
   }
   el.innerHTML = parts.join('');
 
+  bind<HTMLSelectElement>('profile', (v) => {
+    state.profile = v;
+    buildFinder();
+    drawNetwork(false);
+    void recompute();
+  });
   bind<HTMLSelectElement>('algorithm', (v) => (state.algorithm = v as UiState['algorithm']));
   bind<HTMLSelectElement>('mode', (v) => (state.mode = v as SnapMode));
   bind<HTMLSelectElement>('selection', (v) => {
@@ -211,8 +249,12 @@ function renderPresets(): void {
       if (preset.levels?.length) {
         state.floor = preset.levels[preset.levels.length - 1];
         renderFloors();
+        drawNetwork(false);
       }
-      void recompute();
+      void recompute().then(() =>
+        // On a map, zoom to the preset's route (clicks by hand keep the view where it is).
+        view.focus?.([...waypoints, ...(overlay.routes ?? []).flatMap((r) => r.path)]),
+      );
     });
     el.appendChild(btn);
   }
@@ -220,54 +262,68 @@ function renderPresets(): void {
 
 // ------------------------------------------------------------------------------------------- scenario
 
+let loading = 0;
+
 async function loadScenario(next: Scenario<unknown>): Promise<void> {
+  const ticket = ++loading;
   scenario = next;
+  network = null;
+  finder = null;
   waypoints = [];
   waypointFeatureIds = [];
   waypointLevels = [];
   state.floor = next.levels ? next.levels.floors[0].key : undefined;
+  state.profile = next.profiles?.[0]?.id;
   state.selection = next.defaultRouteOptions.snap?.selection === 'optimal' ? 'optimal' : 'nearest';
   state.costMode = (next.defaultRouteOptions.snap?.costMode as SnapCostMode) ?? 'ends';
   state.onFailure = 'fail';
   state.featureConstraint = false;
   renderTabs();
   $<HTMLElement>('blurb').textContent = next.blurb;
+  $<HTMLElement>('build-info').textContent = '';
   $<HTMLElement>('summary').innerHTML = '<p class="hint">加载中 · loading…</p>';
-  clearSvg(svg);
+  $<HTMLElement>('extra').innerHTML = '';
+  svgView.setLatScale(next.latScale ?? 1);
 
-  network = typeof next.network === 'function' ? await next.network() : next.network;
-  finder = new LineFinder(network, next.graphOptions);
-
-  const coordLists = network.features
-    .map((f) => f.geometry as { type?: string; coordinates?: unknown } | null)
-    .flatMap((g) =>
-      g?.type === 'LineString'
-        ? [g.coordinates as Position[]]
-        : g?.type === 'MultiLineString'
-          ? (g.coordinates as Position[][])
-          : [],
-    );
-  const bounds = boundsOf(coordLists);
-  const latScale = next.latScale ?? 1;
-  projector = fitProjector(bounds, VIEW_W, VIEW_H, PADDING, latScale);
-  toData = inverseFitProjector(bounds, VIEW_W, VIEW_H, PADDING, latScale);
-  svg.setAttribute('viewBox', projector.viewBox);
+  const [loaded] = await Promise.all([
+    typeof next.network === 'function' ? next.network() : Promise.resolve(next.network),
+    useView(next.view ?? 'svg'),
+  ]);
+  if (ticket !== loading) return; // another tab was picked meanwhile
+  network = loaded;
+  buildFinder();
 
   renderFloors();
   renderOptions();
   renderPresets();
-  renderNetworkOnly();
+  drawNetwork(true);
   renderSummaryHint();
-  $<HTMLElement>('extra').innerHTML = '';
   if (scenario.features.diagnostics) renderDiagnosticsButton();
 }
 
-function renderNetworkOnly(): void {
-  if (!network || !projector) return;
-  clearSvg(svg);
-  renderNetwork(svg, network, projector, (props, index) =>
-    scenario.styleOf(props, index, { level: state.floor }),
-  );
+/** Builds the graph for the current scenario and profile, and says how long that took. */
+function buildFinder(): void {
+  if (!network) return;
+  const profile = currentProfile();
+  const t0 = performance.now();
+  finder = new LineFinder(network, profile?.graphOptions ?? scenario.graphOptions);
+  const ms = performance.now() - t0;
+  const s = finder.graph.stats;
+  const fmt = (n: number) => n.toLocaleString('en-US');
+  $<HTMLElement>('build-info').innerHTML =
+    `建图 <b>${ms.toFixed(ms < 10 ? 1 : 0)} ms</b> · ${fmt(s.coordinates)} 坐标 · ${fmt(s.nodes)} 节点 · ` +
+    `${fmt(s.edges)} 有向边 · ${fmt(s.components)} 个连通分量`;
+}
+
+function styleOf(props: unknown, index: number) {
+  const byProfile = currentProfile()?.styleOf;
+  return (byProfile ?? scenario.styleOf)(props, index, { level: state.floor });
+}
+
+function drawNetwork(fit: boolean): void {
+  if (!network) return;
+  view.setNetwork(network, styleOf, fit);
+  overlay = {};
 }
 
 function renderSummaryHint(): void {
@@ -285,17 +341,13 @@ function renderDiagnosticsButton(): void {
   btn.style.marginTop = '10px';
   btn.addEventListener('click', () => {
     if (!finder) return;
-    const diag = finder.graph.diagnostics({ limit: 200 });
-    if (projector)
-      renderDangles(
-        svg,
-        diag.dangles.items.map((d) => d.location),
-        projector,
-      );
+    const diag = finder.graph.diagnostics({ limit: 500 });
+    overlay = { ...overlay, dangles: diag.dangles.items.map((d) => d.location) };
+    view.setOverlay(overlay);
     el.querySelector('.diag-result')?.remove();
     const box = document.createElement('div');
     box.className = 'diag-result';
-    box.innerHTML = `<p class="hint">悬挂端点 ${diag.dangles.total}（图中已标红 ×，截断 ${diag.dangles.truncated}）·
+    box.innerHTML = `<p class="hint">悬挂端点 ${diag.dangles.total}（图中已标红，最多画 500 个，截断 ${diag.dangles.truncated}）·
       连通分量 ${diag.components.total} · 非法坐标 ${diag.invalidCoordinates?.total ?? 0} ·
       共线重叠 ${diag.overlaps.total}</p>`;
     el.appendChild(box);
@@ -305,25 +357,18 @@ function renderDiagnosticsButton(): void {
 
 // -------------------------------------------------------------------------------------------- clicking
 
-svg.addEventListener('click', (ev) => {
-  if (!toData) return;
-  const pt = svg.createSVGPoint();
-  pt.x = ev.clientX;
-  pt.y = ev.clientY;
-  const ctm = svg.getScreenCTM();
-  if (!ctm) return;
-  const local = pt.matrixTransform(ctm.inverse());
-  const data = toData([local.x, local.y]);
+function addWaypoint(data: Position): void {
+  if (!finder) return;
   waypoints.push(data);
   waypointFeatureIds.push(undefined);
   waypointLevels.push(scenario.levels ? state.floor : undefined);
-  if (state.featureConstraint && finder) {
+  if (state.featureConstraint) {
     const candidates = finder.candidates(data, { candidates: 1 });
     const id = candidates[0]?.featureId;
     if (id !== undefined) waypointFeatureIds[waypointFeatureIds.length - 1] = [String(id)];
   }
   void recompute();
-});
+}
 
 $('clear').addEventListener('click', () => {
   waypoints = [];
@@ -366,14 +411,13 @@ function baseOptions(): RouteOptions {
 }
 
 async function recompute(): Promise<void> {
-  if (!finder || !projector) return;
-  renderNetworkOnly();
+  if (!finder) return;
+  const next: Overlay = {};
   if (waypoints.length < 2) {
-    renderWaypoints(
-      svg,
-      waypoints.map((p, i) => ({ input: p, index: i, ok: true })),
-      projector,
-    );
+    next.waypoints = waypoints.map((p, i) => ({ input: p, index: i, ok: true }));
+    if (waypoints.length > 0) next.candidates = candidateHint(waypoints[waypoints.length - 1]);
+    overlay = next;
+    view.setOverlay(next);
     renderSummaryHint();
     return;
   }
@@ -390,16 +434,12 @@ async function recompute(): Promise<void> {
       ...opts,
       snap: { ...opts.snap, selection: 'optimal', costMode: state.costMode, candidates: 4 },
     });
-    renderRoutes(
-      svg,
-      [
-        ...(nearest.ok
-          ? [{ path: nearest.path, color: '#2563eb', width: 6, dash: '3,5', label: 'nearest' }]
-          : []),
-        ...(optimal.ok ? [{ path: optimal.path, color: '#f59e0b', width: 4, label: 'optimal' }] : []),
-      ],
-      projector,
-    );
+    next.routes = [
+      ...(nearest.ok
+        ? [{ path: nearest.path, color: '#2563eb', width: 6, dash: '3,5', label: 'nearest' }]
+        : []),
+      ...(optimal.ok ? [{ path: optimal.path, color: '#f59e0b', width: 4, label: 'optimal' }] : []),
+    ];
     renderCompareSummary(nearest, optimal);
   } else {
     const result = finder.route(inputs, {
@@ -408,14 +448,14 @@ async function recompute(): Promise<void> {
       onFailure: scenario.features.failurePolicy ? state.onFailure : opts.onFailure,
     });
     if (result.ok) {
-      if (scenario.features.levels) renderLevelRoute(result);
-      else renderRoutes(svg, [{ path: result.path, color: '#2563eb', width: 5 }], projector);
+      if (scenario.features.levels) Object.assign(next, levelRoute(result));
+      else next.routes = [{ path: result.path, color: '#2563eb', width: 5 }];
     }
     renderSummary(result);
   }
 
   const featureConstraintOn = state.featureConstraint;
-  const marks = waypoints.map((p, i) => {
+  next.waypoints = waypoints.map((p, i) => {
     const used = featureConstraintOn && waypointFeatureIds[i];
     const c = finder!.candidates(p, {
       candidates: 1,
@@ -425,19 +465,18 @@ async function recompute(): Promise<void> {
     });
     return { input: p, location: c[0]?.location, index: i, ok: c.length > 0 };
   });
-  renderWaypoints(svg, marks, projector);
-
-  if (waypoints.length > 0) renderCandidateHint(waypoints[waypoints.length - 1]);
+  next.candidates = candidateHint(waypoints[waypoints.length - 1]);
+  overlay = next;
+  view.setOverlay(next);
 }
 
 /**
- * Draws the route the way an indoor map does: the current floor solid, the other floors ghosted, every
- * passage between floors dashed, and a clickable marker where the route changes level.
+ * The route the way an indoor map draws it: the current floor solid, the other floors ghosted, every passage
+ * between floors dashed, and a clickable marker where the route changes level.
  */
-function renderLevelRoute(result: RouteSuccess<unknown>): void {
-  if (!projector) return;
+function levelRoute(result: RouteSuccess<unknown>): Overlay {
   const { features } = toLevelFeatures(result);
-  const routes: { path: Position[]; color: string; width?: number; dash?: string }[] = [];
+  const routes: RouteLine[] = [];
   for (const f of features) {
     if (f.geometry.type !== 'LineString') continue;
     const path = f.geometry.coordinates;
@@ -448,10 +487,9 @@ function renderLevelRoute(result: RouteSuccess<unknown>): void {
       routes.push({ path, color: active ? '#2563eb' : '#bfdbfe', width: active ? 5 : 3 });
     }
   }
-  renderRoutes(svg, routes, projector);
-  renderTransitions(
-    svg,
-    features
+  return {
+    routes,
+    transitions: features
       .filter((f) => f.properties.kind === 'transition' && f.geometry.type === 'Point')
       .map((f) => ({
         location: f.geometry.coordinates as Position,
@@ -460,11 +498,11 @@ function renderLevelRoute(result: RouteSuccess<unknown>): void {
           if (f.properties.toLevel === undefined) return;
           state.floor = f.properties.toLevel;
           renderFloors();
+          drawNetwork(false);
           void recompute();
         },
       })),
-    projector,
-  );
+  };
 }
 
 function renderTransitionTable(result: RouteResult<unknown>): void {
@@ -500,14 +538,16 @@ function renderSummary(result: RouteResult<unknown>): void {
     $<HTMLElement>('json-output').textContent = JSON.stringify(r, null, 2);
     return;
   }
+  const unit = currentProfile()?.unit;
   summary.innerHTML =
     summaryHeader(true, '') +
     dl([
-      ['weight', result.weight.toFixed(2)],
+      [`weight${unit ? `（${unit}）` : ''}`, result.weight.toFixed(2)],
       ['distance', result.distance.toFixed(2)],
       ['networkWeight', result.networkWeight.toFixed(2)],
       ['snapWeight', result.snapWeight.toFixed(2)],
       ['algorithm', result.algorithm],
+      ['settled', String(result.legs.reduce((n, leg) => n + leg.settled, 0))],
       ['complete', String(result.complete)],
       ['skipped', String(result.skipped.length)],
       ...(result.levelChanges !== undefined
@@ -578,22 +618,17 @@ function renderMeasures(result: RouteResult<unknown>): void {
     : '';
 }
 
-// --------------------------------------------------------------------------------------------- start
-
-/** Shows every candidate location the most recently placed waypoint could have used, nearest highlighted. */
-function renderCandidateHint(point: Position): void {
-  if (!finder || !projector) return;
+/** Every candidate location the most recently placed waypoint could have used, the nearest highlighted. */
+function candidateHint(point: Position): CandidateMark[] {
+  if (!finder) return [];
   const list: CandidateInfo[] = finder.candidates(point, {
     candidates: 6,
     mode: state.mode,
     ...(scenario.levels && state.floor !== undefined ? { group: state.floor } : {}),
   });
-  renderCandidates(
-    svg,
-    list.map((c, i) => ({ location: c.location, selected: i === 0 })),
-    projector,
-  );
+  return list.map((c, i) => ({ location: c.location, selected: i === 0 }));
 }
 
+// --------------------------------------------------------------------------------------------- start
+
 void loadScenario(scenarios[0]);
-window.addEventListener('resize', () => void recompute());

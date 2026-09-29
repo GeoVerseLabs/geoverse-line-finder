@@ -1,5 +1,5 @@
 import type { GraphOptions, GroupKey, NetworkCollection, Position, RouteOptions } from '../../../../src';
-import type { FeatureStyle } from '../lib/svg';
+import type { FeatureStyle } from '../lib/view';
 
 export interface ScenarioPreset {
   label: string;
@@ -30,10 +30,30 @@ export interface ScenarioLevels<P> {
   floorOf: (props: P) => GroupKey | null;
 }
 
+/**
+ * One way of travelling the same network (driving time, walking distance…): a graph of its own, built when
+ * the profile is picked — "one graph per profile".
+ */
+export interface ScenarioProfile<P> {
+  id: string;
+  label: string;
+  graphOptions: GraphOptions<P>;
+  styleOf?: Scenario<P>['styleOf'];
+  /** Unit of the weight, shown next to it. */
+  unit?: string;
+}
+
 export interface Scenario<P = unknown> {
   id: string;
   title: string;
   blurb: string;
+  /**
+   * `'map'`: longitude / latitude data on a MapLibre map with an OpenFreeMap basemap. `'svg'` (default): the
+   * plain SVG canvas, for planar data where a basemap would only mislead.
+   */
+  view?: 'svg' | 'map';
+  /** Alternative graphs over the same network; the first is built on load. Overrides `graphOptions`. */
+  profiles?: ScenarioProfile<P>[];
   /** Network + finder options; `network` may be a loader for data fetched at runtime. */
   network: NetworkCollection<P> | (() => Promise<NetworkCollection<P>>);
   graphOptions: GraphOptions<P>;

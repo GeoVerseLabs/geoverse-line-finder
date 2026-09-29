@@ -1,3 +1,4 @@
+import { gothenburgScenario } from './gothenburg';
 import { gpfScenario } from './gpf';
 import { gridScenario } from './grid';
 import { multiLevelScenario } from './multi-level';
@@ -6,9 +7,10 @@ import { warehouseScenario } from './warehouse';
 
 export const scenarios: Scenario<unknown>[] = [
   warehouseScenario as Scenario<unknown>,
+  gothenburgScenario as Scenario<unknown>,
   multiLevelScenario as Scenario<unknown>,
   gridScenario as Scenario<unknown>,
   gpfScenario as Scenario<unknown>,
 ];
 
-export type { Scenario, ScenarioFeatures, ScenarioLevels, ScenarioPreset } from './types';
+export type { Scenario, ScenarioFeatures, ScenarioLevels, ScenarioPreset, ScenarioProfile } from './types';

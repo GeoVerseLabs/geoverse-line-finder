@@ -211,6 +211,34 @@ a {
   background-size: 40px 40px;
 }
 
+.mapgl {
+  width: 100%;
+  height: 520px;
+}
+
+.mapgl[hidden] {
+  display: none;
+}
+
+/* A click adds a waypoint: show a crosshair rather than MapLibre's grab hand (dragging still pans). */
+.mapgl .maplibregl-canvas-container.maplibregl-interactive {
+  cursor: crosshair;
+}
+
+.build-info {
+  margin: 0 0 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.build-info:empty {
+  display: none;
+}
+
 .hint {
   margin: 0;
   padding: 8px 14px;

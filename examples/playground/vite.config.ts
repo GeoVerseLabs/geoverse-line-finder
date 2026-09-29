@@ -10,5 +10,9 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // MapLibre (about 1 MB, 280 kB gzip) is its own chunk, loaded only when a map scenario is opened.
+    chunkSizeWarningLimit: 1100,
   },
+  // MapLibre's worker is an ES module importing a shared chunk; bundle it as one (see lib/maplibre-view.ts).
+  worker: { format: 'es' },
 });

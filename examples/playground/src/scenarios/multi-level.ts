@@ -1,4 +1,4 @@
-import type { NetworkCollection, NetworkFeature, Position, VerticalConnector } from '../../../../src';
+import type { NetworkCollection, NetworkFeature, Position } from '../../../../src';
 import type { Scenario } from './types';
 
 export interface LevelProps {
@@ -8,6 +8,8 @@ export interface LevelProps {
   /** Connectors only. */
   from?: number;
   to?: number;
+  /** The lift point: the floors it serves, as an OSM `level=1;2;3;4` tag would give them. */
+  level?: string;
   name?: string;
 }
 
@@ -127,18 +129,16 @@ function network(): NetworkCollection<LevelProps> {
       ),
     );
   }
+  // The lift core is one point serving every floor, the way OSM maps a lift (highway=elevator + level=…).
+  // pointConnector below turns it into a vertical connector: one ride is one section.
+  features.push({
+    type: 'Feature',
+    id: 'lift-core',
+    properties: { kind: 'elevator', level: FLOORS.join(';'), name: '核心筒电梯' },
+    geometry: { type: 'Point', coordinates: [30, 20] },
+  });
   return { type: 'FeatureCollection', features };
 }
-
-const lift: VerticalConnector<LevelProps> = {
-  id: 'lift-core',
-  kind: 'elevator',
-  stops: FLOORS.map((f) => ({ group: f, position: [30, 20] as Position })),
-  // One ride costs 8 (waiting, in and out) plus 2 per floor - whether it stops on the way or not.
-  boardCost: 8,
-  perLevelCost: 2,
-  properties: { kind: 'elevator', name: '核心筒电梯' },
-};
 
 const CONNECTOR_COLOR = '#f59e0b';
 
@@ -147,7 +147,7 @@ export const multiLevelScenario: Scenario<LevelProps> = {
   title: '多楼层 · 电梯 / 楼梯 / 扶梯',
   blurb:
     '四层办公楼，各层平面完全重叠，只有 group 把它们分开；levels 再告诉库"这一组是第几层、标高多少"。' +
-    '三种上下方式代价不同：核心筒电梯（verticalConnectors 声明，一次乘坐 = 一段，8 + 2/层）、' +
+    '三种上下方式代价不同：核心筒电梯（一个点要素，经 pointConnector 变成竖向连接器，一次乘坐 = 一段，8 + 2/层）、' +
     '西侧楼梯（按爬升计价）、东侧扶梯（只上行）。用楼层按钮切层，途经点会带上 snap.group 落在当前层；' +
     '结果按 toLevelFeatures 分层绘制——当前层实线、其他层淡显、换层段橙色虚线，点橙色方块可跳到它通向的楼层。',
   network: network(),
@@ -157,7 +157,11 @@ export const multiLevelScenario: Scenario<LevelProps> = {
     group: (p) => (p.kind === 'corridor' ? p.floor! : ([p.from!, p.to!] as const)),
     levels: (g) =>
       typeof g === 'number' ? { ordinal: g, elevation: (g - 1) * FLOOR_HEIGHT, name: `F${g}` } : undefined,
-    verticalConnectors: [lift],
+    // One ride costs 8 (waiting, in and out) plus 2 per floor - whether it stops on the way or not.
+    pointConnector: (p) =>
+      p.kind === 'elevator'
+        ? { groups: p.level!.split(';').map(Number), boardCost: 8, perLevelCost: 2 }
+        : null,
     weight: (_a, _b, p, ctx) => {
       if (p.kind === 'corridor') return ctx.distance;
       // Stairs: the treads plus 6 per metre climbed; going down is cheaper.

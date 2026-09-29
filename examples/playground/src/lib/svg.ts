@@ -1,9 +1,12 @@
 import type { NetworkCollection, Position } from '../../../../src';
 import type { Projector } from './project';
+import type { CandidateMark, FeatureStyle, RouteLine, TransitionMark, WaypointMark } from './view';
+
+export type { FeatureStyle } from './view';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-export function clearSvg(svg: SVGSVGElement): void {
+export function clearSvg(svg: SVGElement): void {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 }
 
@@ -20,16 +23,12 @@ function pointsAttr(coords: Position[], projector: Projector): string {
   return coords.map((c) => projector.toSvg(c).join(',')).join(' ');
 }
 
-export interface FeatureStyle {
-  stroke: string;
-  width: number;
-  dash?: string;
-  opacity?: number;
-}
-
-/** Draws every LineString/MultiLineString feature as a polyline, styled per feature via `styleOf`. */
+/**
+ * Draws every LineString/MultiLineString feature as a polyline and every Point feature (a lift mapped as a
+ * point, say) as a small square, styled per feature via `styleOf`.
+ */
 export function renderNetwork<P>(
-  svg: SVGSVGElement,
+  svg: SVGElement,
   network: NetworkCollection<P>,
   projector: Projector,
   styleOf: (props: P, featureIndex: number) => FeatureStyle,
@@ -46,6 +45,23 @@ export function renderNetwork<P>(
           ? (geometry.coordinates as Position[][])
           : [];
     const style = styleOf(feature.properties as P, i);
+    if (geometry.type === 'Point') {
+      const [x, y] = projector.toSvg(geometry.coordinates as Position);
+      g.appendChild(
+        svgEl('rect', {
+          x: x - 6,
+          y: y - 6,
+          width: 12,
+          height: 12,
+          rx: 2,
+          fill: style.stroke,
+          stroke: '#fff',
+          'stroke-width': 2,
+          ...(style.opacity !== undefined ? { opacity: style.opacity } : {}),
+        }),
+      );
+      return;
+    }
     for (const part of parts) {
       g.appendChild(
         svgEl('polyline', {
@@ -65,11 +81,7 @@ export function renderNetwork<P>(
 }
 
 /** Draws one or more route paths (e.g. nearest vs optimal, overlaid for comparison). */
-export function renderRoutes(
-  svg: SVGSVGElement,
-  routes: { path: Position[]; color: string; width?: number; dash?: string; label?: string }[],
-  projector: Projector,
-): void {
+export function renderRoutes(svg: SVGElement, routes: RouteLine[], projector: Projector): void {
   const g = svgEl('g', { class: 'routes' });
   for (const r of routes) {
     if (r.path.length < 2) continue;
@@ -88,15 +100,8 @@ export function renderRoutes(
   svg.appendChild(g);
 }
 
-export interface WaypointMark {
-  input: Position;
-  location?: Position;
-  index: number;
-  ok: boolean;
-}
-
 /** Draws the raw click (small ring) and, when snapped, the network location (filled dot) joined by a thin line. */
-export function renderWaypoints(svg: SVGSVGElement, waypoints: WaypointMark[], projector: Projector): void {
+export function renderWaypoints(svg: SVGElement, waypoints: WaypointMark[], projector: Projector): void {
   const g = svgEl('g', { class: 'waypoints' });
   for (const w of waypoints) {
     const [ix, iy] = projector.toSvg(w.input);
@@ -154,11 +159,7 @@ export function renderWaypoints(svg: SVGSVGElement, waypoints: WaypointMark[], p
  * decoration only: `pointer-events: none` keeps them from swallowing clicks meant for the map or for a
  * level-transition marker underneath.
  */
-export function renderCandidates(
-  svg: SVGSVGElement,
-  candidates: { location: Position; selected: boolean }[],
-  projector: Projector,
-): void {
+export function renderCandidates(svg: SVGElement, candidates: CandidateMark[], projector: Projector): void {
   const g = svgEl('g', { class: 'candidates' });
   for (const c of candidates) {
     const [x, y] = projector.toSvg(c.location);
@@ -177,14 +178,8 @@ export function renderCandidates(
   svg.appendChild(g);
 }
 
-export interface TransitionMark {
-  location: Position;
-  label: string;
-  onClick?: () => void;
-}
-
 /** Marks where a route changes level; clicking one switches the map to the floor it leads to. */
-export function renderTransitions(svg: SVGSVGElement, marks: TransitionMark[], projector: Projector): void {
+export function renderTransitions(svg: SVGElement, marks: TransitionMark[], projector: Projector): void {
   const g = svgEl('g', { class: 'transitions' });
   for (const m of marks) {
     const [x, y] = projector.toSvg(m.location);
@@ -221,7 +216,7 @@ export function renderTransitions(svg: SVGSVGElement, marks: TransitionMark[], p
 }
 
 /** Marks dangling ends (red ×) from `graph.diagnostics()`. */
-export function renderDangles(svg: SVGSVGElement, points: Position[], projector: Projector): void {
+export function renderDangles(svg: SVGElement, points: Position[], projector: Projector): void {
   const g = svgEl('g', { class: 'dangles' });
   for (const p of points) {
     const [x, y] = projector.toSvg(p);
