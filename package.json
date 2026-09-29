@@ -1,7 +1,7 @@
 {
   "name": "geoverse-line-finder",
-  "version": "0.2.0",
-  "description": "Weight-aware shortest paths on GeoJSON LineString networks: pluggable A*/Dijkstra/ALT engines, constrained and cost-optimal snapping, multi-waypoint routes with failure policies, linear referencing and topology diagnostics.",
+  "version": "0.3.0",
+  "description": "Weight-aware shortest paths on GeoJSON LineString networks: pluggable A*/Dijkstra/ALT engines, constrained and cost-optimal snapping, multi-waypoint routes with failure policies, multi-level (indoor) routing, explicit node-id topology, linear referencing and topology diagnostics.",
   "type": "module",
   "license": "Apache-2.0",
   "author": "DIY Liu",
@@ -22,7 +22,9 @@
     "astar",
     "dijkstra",
     "network",
-    "gis"
+    "gis",
+    "indoor",
+    "multi-level"
   ],
   "sideEffects": false,
   "files": [

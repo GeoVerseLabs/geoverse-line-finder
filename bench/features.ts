@@ -1,9 +1,10 @@
 /**
- * Benchmarks for the 0.2.0 features.
+ * Benchmarks for the features since 0.2.0.
  *
- *   pnpm bench:features [--rounds 5] [--pairs 300] [--only regression,alt,bidirectional,optimal,quality]
+ *   pnpm bench:features [--rounds 5] [--pairs 300] [--only regression,build,alt,bidirectional,optimal,levels,quality]
  *
  * - regression: default configurations against the published 0.1.0 (npm alias `glf-baseline`);
+ * - build: graph construction alone against 0.1.0, plus node ids and a multi-level tower;
  * - alt: A* with and without landmarks; bidirectional: Dijkstra variants without a heuristic;
  * - optimal: nearest vs. optimal selection on the synthetic warehouse (292 tasks × 8 waypoints);
  * - levels: the level-aware A* bound on a 30-storey building (timings plus settled-node counts);
@@ -15,9 +16,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { cpus } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as baseline from 'glf-baseline';
 import {
   LineFinder,
@@ -42,7 +43,7 @@ const arg = (name: string, fallback: string) => {
 };
 const ROUNDS = Math.max(3, Number(arg('rounds', '5')));
 const PAIRS = Number(arg('pairs', '300'));
-const ONLY = new Set(arg('only', 'regression,alt,bidirectional,optimal,levels,quality').split(','));
+const ONLY = new Set(arg('only', 'regression,build,alt,bidirectional,optimal,levels,quality').split(','));
 
 function dataDir(): string {
   const candidates = [
@@ -222,7 +223,7 @@ if (ONLY.has('regression')) {
       sameWeights: true,
       contestants: [
         { name: '0.1.0', init: () => new baseline.LineFinder(large, { weight }) as unknown as Finder },
-        { name: '0.2.0', init: () => new current.LineFinder(large, { weight }) as unknown as Finder },
+        { name: 'this build', init: () => new current.LineFinder(large, { weight }) as unknown as Finder },
       ],
     });
   }
@@ -242,7 +243,7 @@ if (ONLY.has('regression')) {
           }) as unknown as Finder,
       },
       {
-        name: '0.2.0',
+        name: 'this build',
         init: () => new current.LineFinder(net, { weight: warehouseWeight }) as unknown as Finder,
       },
     ],
@@ -391,6 +392,80 @@ const sections: string[] = [header];
 for (const s of scenarios) {
   console.log(`## ${s.title}`);
   const text = table(s, run(s));
+  console.log(`\n${text}\n`);
+  sections.push(text, '');
+}
+
+if (ONLY.has('build')) {
+  // Graph builds alone, built artefacts on both sides (see `regression`): this repository's dist against the
+  // published 0.1.0, or against another build given as `--against <dist/index.js>` (an unpacked
+  // `npm pack geoverse-line-finder@0.2.0`, say). A sample is the mean of BUILDS consecutive builds (throughput,
+  // steadier than single builds); rows the other build cannot express (node ids, levels) time this build only.
+  const current = (await import(
+    new URL('../dist/index.js', import.meta.url).href
+  )) as typeof import('../src');
+  const against = arg('against', '');
+  let other: { buildGraph: (network: never, options: never) => unknown } = baseline;
+  let otherName = '0.1.0';
+  if (against) {
+    other = (await import(pathToFileURL(resolve(against)).href)) as typeof other;
+    const pkg = join(dirname(resolve(against)), '..', 'package.json');
+    otherName = existsSync(pkg)
+      ? (JSON.parse(readFileSync(pkg, 'utf8')) as { version: string }).version
+      : against;
+  }
+  const BUILDS = 5;
+  // Integer node ids per coordinate, as OSM data carries them (numbered here once, outside the timing).
+  const numbering = new Map<string, number>();
+  const ids = large.features.map((f) =>
+    (f.geometry as { coordinates: Position[] }).coordinates.map((c) => {
+      const key = `${c[0]},${c[1]}`;
+      let id = numbering.get(key);
+      if (id === undefined) numbering.set(key, (id = numbering.size));
+      return id;
+    }),
+  );
+  const coordinateIds = (_p: unknown, c: { featureIndex: number; index: number }) =>
+    ids[c.featureIndex][c.index];
+  const cases: [label: string, network: NetworkCollection<unknown>, options: object, both: boolean][] = [
+    ['large-network · distance', large, {}, true],
+    ['large-network · OSM travel time', large, { weight: osm }, true],
+    ['large-network · tolerance 1.1 m', large, { tolerance: 1.1 }, true],
+    [
+      'large-network · snapDangles 1 + splitIntersections',
+      large,
+      { snapDangles: 1, splitIntersections: true },
+      true,
+    ],
+    ['large-network · nodeId (an id per coordinate)', large, { nodeId: coordinateIds }, false],
+    ['30-storey tower · levels + splitIntersections', tower.network, tower.graphOptions, false],
+  ];
+  const lines = [
+    `### Graph build: ${otherName} vs this build (dist)`,
+    '',
+    `${ROUNDS} samples (+1 warm-up) of ${BUILDS} consecutive builds each · order alternates per sample · ms per build`,
+    '',
+    `| network · options | ${otherName} ms | this build ms | ratio (medians) |`,
+    '| --- | --- | --- | --- |',
+  ];
+  for (const [label, network, options, both] of cases) {
+    const old: number[] = [];
+    const now: number[] = [];
+    for (let round = 0; round <= ROUNDS; round++) {
+      for (const which of round % 2 ? ['now', 'old'] : ['old', 'now']) {
+        if (which === 'old' && !both) continue;
+        const build = which === 'old' ? other.buildGraph : current.buildGraph;
+        gc?.();
+        const t0 = performance.now();
+        for (let i = 0; i < BUILDS; i++) build(network as never, options as never);
+        if (round > 0) (which === 'old' ? old : now).push((performance.now() - t0) / BUILDS);
+      }
+    }
+    lines.push(
+      `| ${label} | ${both ? fmt(old) : '—'} | ${fmt(now)} | ${both ? `${(median(old) / median(now)).toFixed(2)}×` : '—'} |`,
+    );
+  }
+  const text = lines.join('\n');
   console.log(`\n${text}\n`);
   sections.push(text, '');
 }
