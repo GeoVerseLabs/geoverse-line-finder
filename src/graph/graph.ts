@@ -20,7 +20,10 @@ export interface GraphStats {
   features: number;
   /** Features with a `LineString` / `MultiLineString` geometry. */
   lineFeatures: number;
-  /** Features skipped because their geometry is not routable (points, polygons, null…). */
+  /**
+   * Features skipped because their geometry is not routable (points, polygons, null…). Points that
+   * `pointConnector` turned into connectors are not skipped.
+   */
   skippedFeatures: number;
   /** Non-finite or malformed coordinates; each one breaks its line. */
   invalidCoordinates: number;
@@ -53,6 +56,10 @@ export interface GraphStats {
   groups: number;
   /** Features synthesised from `verticalConnectors` (appended after the input collection). */
   verticalConnectors: number;
+  /** `Point` features of the input that `pointConnector` turned into vertical connectors. */
+  pointConnectors: number;
+  /** Vertices identified by a node id (`nodeId` option); `0` without it. */
+  nodeIds: number;
 }
 
 export interface VertexTable {

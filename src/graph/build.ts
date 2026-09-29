@@ -16,13 +16,18 @@ import {
   type LevelInfo,
   type LevelTable,
   type LevelsOption,
+  type PointConnectorFunction,
   type VerticalConnector,
 } from './levels';
 import {
   buildTopology,
+  checkNodeKey,
+  isPosition,
   scanNetwork,
   type GroupFunction,
   type GroupKey,
+  type NodeIdFunction,
+  type NodeKey,
   type SyntheticSegment,
 } from './topology';
 
@@ -48,6 +53,12 @@ export interface GraphOptions<P = unknown> {
    */
   group?: GroupFunction<P>;
   /**
+   * Explicit topology from node ids in the data (OSM node ids, OpenSidewalks `_u_id` / `_v_id`, GTFS stop
+   * ids): coordinates with the same id are one vertex whatever their positions; coordinates without an id are
+   * matched by position (`tolerance`) as without this option. See {@link NodeIdFunction}.
+   */
+  nodeId?: NodeIdFunction<P>;
+  /**
    * What each group is vertically (storey number, height, display name). It switches on the level-aware
    * A* bound, `WeightContext.rise` and the level fields of a route; without it `group` only means
    * connectivity. See {@link LevelsOption}.
@@ -59,6 +70,12 @@ export interface GraphOptions<P = unknown> {
    * `perLevelCost` and `direction` need `levels`.
    */
   verticalConnectors?: readonly VerticalConnector<P>[];
+  /**
+   * Lifts mapped as `Point` features (an OSM `highway=elevator` node tagged `level=0;1;2`): return the levels
+   * a point serves and it becomes a vertical connector like those of `verticalConnectors`, keeping the
+   * point's feature index and properties. See {@link PointConnectorFunction}.
+   */
+  pointConnector?: PointConnectorFunction<P>;
   /** What a weight of `0` means. Default `'impassable'` (geojson-path-finder contract); `'free'` for connectors. */
   zeroWeight?: ZeroWeight;
   /** Record repairs and invalid coordinates so that `graph.diagnostics()` can locate them. Default `false`. */
@@ -106,86 +123,175 @@ function rideCost(
   return boardCost + perLevelCost * levelsCrossed;
 }
 
-interface ResolvedConnectors<P> {
-  features: NetworkFeature<P>[];
-  segments: SyntheticSegment[];
+type LevelLookup = (key: GroupKey | undefined) => LevelInfo | null | undefined;
+
+interface ConnectorStop {
+  group: GroupKey;
+  position: Position;
+  key: NodeKey | undefined;
+}
+
+interface ConnectorCosts {
+  boardCost?: number;
+  perLevelCost?: number;
+  direction?: ConnectorDirection;
 }
 
 /**
- * Expands every {@link VerticalConnector} into one connection per pair of stops ("all stops connected"):
- * a ride between two floors is a single section whose cost counts the boarding once, however many floors
- * lie between them. Floor-by-floor connector features charge it once per hop instead.
+ * Expands one connector into a synthetic segment per pair of stops on different levels ("all stops
+ * connected"): a ride between two floors is a single section whose cost counts the boarding once, however
+ * many floors lie between them. Floor-by-floor connector features charge it once per hop instead. Returns
+ * the coordinates of every ride (one part each, in segment order).
  */
+function expandConnector(
+  where: string,
+  stops: readonly ConnectorStop[],
+  costs: ConnectorCosts,
+  featureIndex: number,
+  levels: LevelLookup | null,
+  segments: SyntheticSegment[],
+): Position[][] {
+  const direction = costs.direction ?? 'both';
+  if (direction !== 'both' && direction !== 'up' && direction !== 'down') {
+    throw new RangeError(`${where}.direction must be "both", "up" or "down", got ${String(direction)}.`);
+  }
+  const boardCost = costs.boardCost ?? 0;
+  const perLevelCost = costs.perLevelCost ?? 0;
+  for (const [name, value] of [
+    ['boardCost', boardCost],
+    ['perLevelCost', perLevelCost],
+  ] as const) {
+    if (typeof value !== 'number' || !(value >= 0) || value === Infinity) {
+      throw new RangeError(`${where}.${name} must be a finite number >= 0, got ${String(value)}.`);
+    }
+  }
+  const ordinals = stops.map((stop, si) => {
+    const info = levels ? levels(stop.group) : null;
+    const ordinal = info ? info.ordinal : NaN;
+    if (!Number.isFinite(ordinal) && (perLevelCost > 0 || direction !== 'both')) {
+      throw new RangeError(
+        `${where}: stop ${si} is in group ${String(stop.group)}, which has no level ordinal; ` +
+          'perLevelCost and a direction restriction need one (set the "levels" option).',
+      );
+    }
+    return ordinal;
+  });
+  const coordinates: Position[][] = [];
+  for (let i = 0; i < stops.length; i++) {
+    for (let j = i + 1; j < stops.length; j++) {
+      if (stops[i].group === stops[j].group) continue; // one stop per level; a self-link is not a ride
+      const span = Math.abs(ordinals[j] - ordinals[i]);
+      const crossed = Number.isFinite(span) ? span : 0;
+      const rising = ordinals[j] > ordinals[i];
+      const forward = rideCost(direction, rising, boardCost, perLevelCost, crossed);
+      const backward = rideCost(direction, !rising, boardCost, perLevelCost, crossed);
+      if (forward === Infinity && backward === Infinity) continue;
+      segments.push({
+        featureIndex,
+        part: coordinates.length,
+        from: stops[i].position,
+        fromGroup: stops[i].group,
+        fromKey: stops[i].key,
+        to: stops[j].position,
+        toGroup: stops[j].group,
+        toKey: stops[j].key,
+        forward,
+        backward,
+      });
+      coordinates.push([stops[i].position, stops[j].position]);
+    }
+  }
+  return coordinates;
+}
+
+function checkGroupKey(group: unknown, where: string): GroupKey {
+  if (typeof group !== 'string' && typeof group !== 'number') {
+    throw new TypeError(`${where} must be a string or number, got ${String(group)}.`);
+  }
+  return group;
+}
+
+interface ResolvedConnectors<P> {
+  /** Features synthesised for `verticalConnectors`, appended after the input collection. */
+  features: NetworkFeature<P>[];
+  /** Point connectors first (in feature order), then `verticalConnectors`. */
+  segments: SyntheticSegment[];
+  /** Points of the input that became connectors. */
+  points: number;
+}
+
+/**
+ * `Point` features that `pointConnector` turns into connectors. They keep their own feature index, so no
+ * feature is synthesised for them.
+ */
+function resolvePointConnectors<P>(
+  network: NetworkCollection<P>,
+  pointConnector: PointConnectorFunction<P>,
+  nodeId: NodeIdFunction<P> | undefined,
+  levels: LevelLookup | null,
+  out: ResolvedConnectors<P>,
+): void {
+  const features = network.features;
+  for (let fi = 0; fi < features.length; fi++) {
+    const feature = features[fi];
+    const geometry = feature?.geometry;
+    if (!geometry || geometry.type !== 'Point') continue;
+    const spec = pointConnector(feature.properties as P, fi, feature);
+    if (spec === null || spec === undefined) continue;
+    const where = `pointConnector (feature #${fi})`;
+    if (typeof spec !== 'object' || !Array.isArray(spec.groups)) {
+      throw new TypeError(`${where} must return { groups, ... } or null.`);
+    }
+    if (spec.groups.length < 2) throw new RangeError(`${where} needs at least two groups.`);
+    const position = geometry.coordinates;
+    if (!isPosition(position)) {
+      throw new TypeError(`${where}: the point has no valid coordinates.`);
+    }
+    let key: NodeKey | undefined;
+    if (nodeId) {
+      const k = nodeId(feature.properties as P, {
+        featureIndex: fi,
+        feature,
+        part: 0,
+        index: 0,
+        last: true,
+        position,
+      });
+      if (checkNodeKey(k, `the point of feature #${fi}`)) key = k;
+    }
+    const stops = spec.groups.map((group, gi) => ({
+      group: checkGroupKey(group, `${where}.groups[${gi}]`),
+      position,
+      key,
+    }));
+    expandConnector(where, stops, spec, fi, levels, out.segments);
+    out.points++;
+  }
+}
+
+/** Every {@link VerticalConnector} becomes a synthesised `MultiLineString` feature, one part per ride. */
 function resolveVerticalConnectors<P>(
   connectors: readonly VerticalConnector<P>[],
   featureOffset: number,
-  levels: ((key: GroupKey | undefined) => LevelInfo | null | undefined) | null,
-): ResolvedConnectors<P> {
-  const features: NetworkFeature<P>[] = [];
-  const segments: SyntheticSegment[] = [];
+  levels: LevelLookup | null,
+  out: ResolvedConnectors<P>,
+): void {
   connectors.forEach((connector, ci) => {
     const where = `verticalConnectors[${ci}]`;
     if (!connector || typeof connector !== 'object' || !Array.isArray(connector.stops)) {
       throw new TypeError(`${where} must be an object with a "stops" array.`);
     }
-    const stops = connector.stops;
-    if (stops.length < 2) throw new RangeError(`${where} needs at least two stops.`);
-    const direction = connector.direction ?? 'both';
-    if (direction !== 'both' && direction !== 'up' && direction !== 'down') {
-      throw new RangeError(`${where}.direction must be "both", "up" or "down", got ${String(direction)}.`);
-    }
-    const boardCost = connector.boardCost ?? 0;
-    const perLevelCost = connector.perLevelCost ?? 0;
-    for (const [name, value] of [
-      ['boardCost', boardCost],
-      ['perLevelCost', perLevelCost],
-    ] as const) {
-      if (typeof value !== 'number' || !(value >= 0) || value === Infinity) {
-        throw new RangeError(`${where}.${name} must be a finite number >= 0, got ${String(value)}.`);
+    if (connector.stops.length < 2) throw new RangeError(`${where} needs at least two stops.`);
+    const stops = connector.stops.map((stop, si): ConnectorStop => {
+      if (!stop || typeof stop !== 'object' || !isPosition(stop.position)) {
+        throw new TypeError(`${where}.stops[${si}] must be { group, position } with a valid position.`);
       }
-    }
-    const ordinals = stops.map((stop, si) => {
-      if (!stop || typeof stop !== 'object' || !Array.isArray(stop.position)) {
-        throw new TypeError(`${where}.stops[${si}] must be { group, position }.`);
-      }
-      if (typeof stop.group !== 'string' && typeof stop.group !== 'number') {
-        throw new TypeError(`${where}.stops[${si}].group must be a string or number.`);
-      }
-      const info = levels ? levels(stop.group) : null;
-      const ordinal = info ? info.ordinal : NaN;
-      if (!Number.isFinite(ordinal) && (perLevelCost > 0 || direction !== 'both')) {
-        throw new RangeError(
-          `${where}.stops[${si}] is in group ${String(stop.group)}, which has no level ordinal; ` +
-            'perLevelCost and a direction restriction need one (set the "levels" option).',
-        );
-      }
-      return ordinal;
+      const group = checkGroupKey(stop.group, `${where}.stops[${si}].group`);
+      const key = checkNodeKey(stop.nodeId, `${where}.stops[${si}]`) ? stop.nodeId : undefined;
+      return { group, position: stop.position, key };
     });
-    const coordinates: Position[][] = [];
-    const featureIndex = featureOffset + ci;
-    for (let i = 0; i < stops.length; i++) {
-      for (let j = i + 1; j < stops.length; j++) {
-        if (stops[i].group === stops[j].group) continue; // one stop per level; a self-link is not a ride
-        const span = Math.abs(ordinals[j] - ordinals[i]);
-        const crossed = Number.isFinite(span) ? span : 0;
-        const rising = ordinals[j] > ordinals[i];
-        const forward = rideCost(direction, rising, boardCost, perLevelCost, crossed);
-        const backward = rideCost(direction, !rising, boardCost, perLevelCost, crossed);
-        if (forward === Infinity && backward === Infinity) continue;
-        segments.push({
-          featureIndex,
-          part: coordinates.length,
-          from: stops[i].position,
-          fromGroup: stops[i].group,
-          to: stops[j].position,
-          toGroup: stops[j].group,
-          forward,
-          backward,
-        });
-        coordinates.push([stops[i].position, stops[j].position]);
-      }
-    }
-    features.push({
+    const coordinates = expandConnector(where, stops, connector, featureOffset + ci, levels, out.segments);
+    out.features.push({
       type: 'Feature',
       id: connector.id,
       geometry: { type: 'MultiLineString', coordinates },
@@ -194,7 +300,6 @@ function resolveVerticalConnectors<P>(
         : { kind: connector.kind ?? 'connector' }) as P,
     });
   });
-  return { features, segments };
 }
 
 /**
@@ -211,8 +316,10 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   if (zeroWeight !== 'impassable' && zeroWeight !== 'free') {
     throw new RangeError(`Option "zeroWeight" must be "impassable" or "free", got ${String(zeroWeight)}.`);
   }
-  if (options.group !== undefined && typeof options.group !== 'function') {
-    throw new TypeError('Option "group" must be a function.');
+  for (const name of ['group', 'nodeId', 'pointConnector'] as const) {
+    if (options[name] !== undefined && typeof options[name] !== 'function') {
+      throw new TypeError(`Option "${name}" must be a function.`);
+    }
   }
   const lookup = options.levels !== undefined ? levelLookup(options.levels) : null;
 
@@ -222,11 +329,17 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   let maxX = scan.maxX;
   let maxY = scan.maxY;
   let resolved: ResolvedConnectors<P> | null = null;
-  if (options.verticalConnectors !== undefined) {
-    if (!Array.isArray(options.verticalConnectors)) {
-      throw new TypeError('Option "verticalConnectors" must be an array.');
+  if (options.verticalConnectors !== undefined && !Array.isArray(options.verticalConnectors)) {
+    throw new TypeError('Option "verticalConnectors" must be an array.');
+  }
+  if (options.pointConnector || options.verticalConnectors) {
+    resolved = { features: [], segments: [], points: 0 };
+    if (options.pointConnector) {
+      resolvePointConnectors(network, options.pointConnector, options.nodeId, lookup, resolved);
     }
-    resolved = resolveVerticalConnectors(options.verticalConnectors, network.features.length, lookup);
+    if (options.verticalConnectors) {
+      resolveVerticalConnectors(options.verticalConnectors, network.features.length, lookup, resolved);
+    }
     // Stops take part in the bounding box: they size the merge grid and the reference latitude.
     for (const link of resolved.segments) {
       for (const p of [link.from, link.to]) {
@@ -254,14 +367,14 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
     splitIntersections: options.splitIntersections === true,
     maxAbsLat,
     group: options.group as GroupFunction<unknown> | undefined,
+    nodeId: options.nodeId as NodeIdFunction<unknown> | undefined,
     recordDiagnostics: options.diagnostics === true,
     synthetic: resolved ? resolved.segments : undefined,
     coordinates: scan.coordinates,
   });
 
-  const features: readonly NetworkFeature<P>[] = resolved
-    ? [...network.features, ...resolved.features]
-    : network.features;
+  const features: readonly NetworkFeature<P>[] =
+    resolved && options.verticalConnectors ? [...network.features, ...resolved.features] : network.features;
   const rawLevels = lookup ? resolveLevels(topo.groupKeys, lookup) : null;
 
   // --- segment geometry and measures ---------------------------------------------------------------
@@ -658,7 +771,7 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
   const stats: GraphStats = {
     features: features.length,
     lineFeatures: topo.lineFeatures,
-    skippedFeatures: topo.skippedFeatures,
+    skippedFeatures: topo.skippedFeatures - (resolved ? resolved.points : 0),
     invalidCoordinates: topo.invalidCoordinates,
     coordinates: topo.coordinates,
     vertices: liveVertices,
@@ -675,6 +788,8 @@ export function buildGraph<P>(network: NetworkCollection<P>, options: GraphOptio
     largestComponentNodes: largest >= 0 ? componentNodes[largest] : 0,
     groups: topo.groupKeys.length,
     verticalConnectors: resolved ? resolved.features.length : 0,
+    pointConnectors: resolved ? resolved.points : 0,
+    nodeIds: store.keyedCount,
   };
 
   return new RoutingGraph<P>({

@@ -282,7 +282,13 @@ export function graphFromTransferable<P = unknown>(
     metric,
     referenceLat: header.metric.referenceLat,
     features,
-    stats: { ...header.stats },
+    // Counters added after 0.2.0 are absent from graphs it serialised.
+    stats: {
+      verticalConnectors: 0,
+      pointConnectors: 0,
+      nodeIds: 0,
+      ...(header.stats as Partial<GraphStats>),
+    } as GraphStats,
     vertices: {
       count: V,
       x,

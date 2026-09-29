@@ -34,6 +34,8 @@ declare class VertexStore {
     merged: number;
     /** Distance to the vertex matched by the last successful {@link find} (`0` for identical coordinates). */
     lastDistance: number;
+    /** Number of vertices that carry a node id. */
+    keyedCount: number;
     private count;
     private readonly tolerance;
     private readonly geographic;
@@ -51,6 +53,10 @@ declare class VertexStore {
     private next;
     private mask;
     private entries;
+    /** Vertex of every node id, per group (see {@link getOrAddKeyed}); only while building. */
+    private ids;
+    /** 1 for vertices that carry a node id. */
+    private keyed;
     constructor(options: VertexStoreOptions, arrays?: {
         x: Float64Array;
         y: Float64Array;
@@ -65,16 +71,25 @@ declare class VertexStore {
     /** Returns the id of the vertex at (or within tolerance of) `position`, creating it when absent. */
     getOrAdd(position: Position, group?: number): number;
     /**
-     * Looks a coordinate up without inserting; `-1` when no vertex of `group` matches.
+     * Returns the vertex of node id `key` in `group`, whatever its coordinates. A key seen for the first time
+     * takes over a vertex without a key at this location (exact, or within tolerance), so that coordinates
+     * without ids still meet it, and otherwise starts a new vertex; it never joins a vertex carrying another
+     * key, however close. {@link lastDistance} is the gap bridged (for the merge log).
      */
-    find(px: number, py: number, group?: number): number;
+    getOrAddKeyed(position: Position, group: number, key: NodeKey): number;
+    /**
+     * Looks a coordinate up without inserting; `-1` when no vertex of `group` matches. `unkeyed` skips vertices
+     * that carry a node id.
+     */
+    find(px: number, py: number, group?: number, unkeyed?: boolean): number;
     /**
      * Adds a vertex unconditionally (split points computed during connectivity repair). A {@link NO_GROUP}
      * vertex is not indexed, so {@link find} never returns it and nothing merges into it.
      */
     append(px: number, py: number, position: Position, group?: number): number;
     /**
-     * Cuts the arrays down to {@link size}, so that a finished graph can share them.
+     * Cuts the arrays down to {@link size}, so that a finished graph can share them, and drops the node-id
+     * index, which only matters while building.
      */
     trim(): void;
     private push;
@@ -97,6 +112,30 @@ type GroupKey = string | number;
  * other vertices, repaired, or matched by a `group` constraint.
  */
 type GroupFunction<P = unknown> = (properties: P, featureIndex: number, feature: NetworkFeature<P>) => GroupKey | readonly [GroupKey, GroupKey] | null | undefined;
+/** A node identifier from the source data: an OSM node id, an OpenSidewalks `_id`, a GTFS `stop_id`… */
+type NodeKey = string | number;
+/** Where a coordinate sits, for {@link NodeIdFunction}. */
+interface NodeIdContext<P = unknown> {
+    readonly featureIndex: number;
+    readonly feature: NetworkFeature<P>;
+    /** Part index within a MultiLineString (`0` for a LineString or a point). */
+    readonly part: number;
+    /** Coordinate index within the part. */
+    readonly index: number;
+    /** `index` is the last coordinate of the part. */
+    readonly last: boolean;
+    readonly position: Position;
+}
+/**
+ * Explicit topology: the node id of a coordinate, or `null` / `undefined` for none. Coordinates with the same
+ * id (in the same connectivity group) are one vertex, however far apart they are; a coordinate without an id
+ * is matched by its position (`tolerance`), as without this option. An id seen for the first time takes over
+ * a vertex without an id at its position, so both kinds of data connect — but a vertex never takes a second
+ * id: two ids at one position stay two vertices (a bridge over a road). Called for every valid coordinate
+ * except the interior of a connector feature (see {@link GroupFunction}), and for the point of a
+ * `pointConnector`.
+ */
+type NodeIdFunction<P = unknown> = (properties: P, context: NodeIdContext<P>) => NodeKey | null | undefined;
 /** Column-wise repair log (see `graph/diagnostics.ts`). */
 interface RepairLog {
     kind: number[];
@@ -452,10 +491,15 @@ interface VerticalConnector<P = unknown> {
     id?: string | number;
     /** Free-form; carried to `sections[].properties.kind` through the synthesised feature. */
     kind?: string;
-    /** Where the connector touches each level. A lift repeats one position; stairs give each landing. */
+    /**
+     * Where the connector touches each level. A lift repeats one position; stairs give each landing. A stop
+     * with a `nodeId` joins the network vertex of that id on its level first (see the `nodeId` option), then
+     * falls back to its position.
+     */
     stops: readonly {
         group: GroupKey;
         position: Position;
+        nodeId?: NodeKey | null;
     }[];
     /** One-off cost of a ride (waiting, getting in and out). Default `0`. */
     boardCost?: number;
@@ -465,6 +509,28 @@ interface VerticalConnector<P = unknown> {
     direction?: ConnectorDirection;
     properties?: P;
 }
+/**
+ * What a `Point` feature is as a vertical connector (see {@link PointConnectorFunction}): the levels it
+ * stops at, all at the point's position, and the same costs as a {@link VerticalConnector}.
+ */
+interface PointConnector {
+    /** Connectivity groups (levels) it serves; at least two. */
+    groups: readonly GroupKey[];
+    /** One-off cost of a ride. Default `0`. */
+    boardCost?: number;
+    /** Cost per level crossed, by `|ordinal difference|`. Default `0`. */
+    perLevelCost?: number;
+    /** `'up'` / `'down'` restrict travel to rising / falling ordinals. Default `'both'`. */
+    direction?: ConnectorDirection;
+}
+/**
+ * Turns `Point` features of the network into vertical connectors — a lift mapped as one point serving
+ * several levels, such as an OSM `highway=elevator` node tagged `level=0;1;2`. Return the levels it serves,
+ * or `null` / `undefined` to leave the point out of the graph as before. The connector keeps the point's
+ * feature index and properties (route sections point back at it); its stops join each level at the point's
+ * node id (`nodeId` option) or position.
+ */
+type PointConnectorFunction<P = unknown> = (properties: P, featureIndex: number, feature: NetworkFeature<P>) => PointConnector | null | undefined;
 
 interface GraphOptions<P = unknown> {
     /** Distance measure. Default `'haversine'` (coordinates in degrees, distances in meters). */
@@ -488,6 +554,12 @@ interface GraphOptions<P = unknown> {
      */
     group?: GroupFunction<P>;
     /**
+     * Explicit topology from node ids in the data (OSM node ids, OpenSidewalks `_u_id` / `_v_id`, GTFS stop
+     * ids): coordinates with the same id are one vertex whatever their positions; coordinates without an id are
+     * matched by position (`tolerance`) as without this option. See {@link NodeIdFunction}.
+     */
+    nodeId?: NodeIdFunction<P>;
+    /**
      * What each group is vertically (storey number, height, display name). It switches on the level-aware
      * A* bound, `WeightContext.rise` and the level fields of a route; without it `group` only means
      * connectivity. See {@link LevelsOption}.
@@ -499,6 +571,12 @@ interface GraphOptions<P = unknown> {
      * `perLevelCost` and `direction` need `levels`.
      */
     verticalConnectors?: readonly VerticalConnector<P>[];
+    /**
+     * Lifts mapped as `Point` features (an OSM `highway=elevator` node tagged `level=0;1;2`): return the levels
+     * a point serves and it becomes a vertical connector like those of `verticalConnectors`, keeping the
+     * point's feature index and properties. See {@link PointConnectorFunction}.
+     */
+    pointConnector?: PointConnectorFunction<P>;
     /** What a weight of `0` means. Default `'impassable'` (geojson-path-finder contract); `'free'` for connectors. */
     zeroWeight?: ZeroWeight;
     /** Record repairs and invalid coordinates so that `graph.diagnostics()` can locate them. Default `false`. */
@@ -683,7 +761,10 @@ interface GraphStats {
     features: number;
     /** Features with a `LineString` / `MultiLineString` geometry. */
     lineFeatures: number;
-    /** Features skipped because their geometry is not routable (points, polygons, null…). */
+    /**
+     * Features skipped because their geometry is not routable (points, polygons, null…). Points that
+     * `pointConnector` turned into connectors are not skipped.
+     */
     skippedFeatures: number;
     /** Non-finite or malformed coordinates; each one breaks its line. */
     invalidCoordinates: number;
@@ -716,6 +797,10 @@ interface GraphStats {
     groups: number;
     /** Features synthesised from `verticalConnectors` (appended after the input collection). */
     verticalConnectors: number;
+    /** `Point` features of the input that `pointConnector` turned into vertical connectors. */
+    pointConnectors: number;
+    /** Vertices identified by a node id (`nodeId` option); `0` without it. */
+    nodeIds: number;
 }
 interface VertexTable {
     readonly count: number;
@@ -1632,4 +1717,4 @@ declare class FourAryHeap implements Heap {
     private siftDown;
 }
 
-export { type AlgorithmCapabilities, AlgorithmRegistry, type CandidateCost, type CandidateDistinct, type CandidateFilter, type CandidateInfo, type CandidateOptions, type CandidateReport, type CandidateSide, type CandidateStatus, type ChainTable, type ComponentReport, type ComponentTable, type ConnectorDirection, type ConnectorEndReport, type ConnectorMode, type DangleReport, type DeserializeOptions, type DiagnosticList, type DiagnosticsLog, type DiagnosticsOptions, type DirectionalWeight, EARTH_RADIUS_M, type EdgeTable, type FailurePolicy, FourAryHeap, GRAPH_FORMAT, GRAPH_FORMAT_VERSION, GRAPH_FORMAT_VERSIONS, type GeometryLike, type GraphDiagnostics, type GraphHeader, type GraphOptions, type GraphSettings, type GraphStats, type GroupFunction, type GroupKey, type Heap, type HeapConstructor, type Heuristic, type InvalidCoordinateReport, type LandmarkOptions, type LandmarkStrategy, LandmarkTable, type LevelFeature, type LevelFeatureCollection, type LevelFeatureKind, type LevelFeatureProperties, type LevelInfo, type LevelKey, type LevelReachability, type LevelTable, type LevelTransition, type LevelsOption, LineFinder, type LineFinderOptions, type LineStringFeature, type ManyOptions, type ManyResult, type MatrixResult, type Metric, type MetricOption, type NearestResult, type NetworkCollection, type NetworkFeature, type NodeChainTable, type NodeTable, type OverlapReport, type PathAlgorithm, type PointFeature, type PointGeometry, type Position, type PropertyWeightOptions, type RepairReport, type ReverseEdgeTable, type RouteFailure, type RouteFailureDetail, type RouteFailureReason, type RouteLeg, type RouteOptions, type RouteResult, type RouteSection, type RouteSuccess, type RouteSummary, RoutingGraph, type SearchBudget, type SearchGraph, type SearchRequest, type SearchResult, SearchScratch, type SectionsDetail, type SegmentTable, type SerializeOptions, type SkippedWaypoint, type SnapConnectivity, type SnapCostMode, type SnapMode, type SnapOptions, type SnapSelection, type SnappedWaypoint, type SpeedWeightOptions, type StrongComponents, type TargetPath, type TransferableGraph, type TransferableLandmarks, type TravelDirection, type VertexTable, type VerticalConnector, type WaypointAccess, type WaypointContext, type WaypointInput, type WaypointObject, type WaypointRole, type WaypointSnapOptions, type WeightContext, type WeightFunction, type WeightResult, type ZeroWeight, astar, bidirectionalDijkstra, buildGraph, builtinAlgorithms, cheapRulerMetric, createAlgorithmRegistry, createPropertyWeight, createSpeedWeight, dijkstra, directional, distanceWeight, euclideanMetric, haversineDistance, haversineMetric, osmDirection, prepareLandmarks, reconstructPath, toLevelFeatures, toLineString };
+export { type AlgorithmCapabilities, AlgorithmRegistry, type CandidateCost, type CandidateDistinct, type CandidateFilter, type CandidateInfo, type CandidateOptions, type CandidateReport, type CandidateSide, type CandidateStatus, type ChainTable, type ComponentReport, type ComponentTable, type ConnectorDirection, type ConnectorEndReport, type ConnectorMode, type DangleReport, type DeserializeOptions, type DiagnosticList, type DiagnosticsLog, type DiagnosticsOptions, type DirectionalWeight, EARTH_RADIUS_M, type EdgeTable, type FailurePolicy, FourAryHeap, GRAPH_FORMAT, GRAPH_FORMAT_VERSION, GRAPH_FORMAT_VERSIONS, type GeometryLike, type GraphDiagnostics, type GraphHeader, type GraphOptions, type GraphSettings, type GraphStats, type GroupFunction, type GroupKey, type Heap, type HeapConstructor, type Heuristic, type InvalidCoordinateReport, type LandmarkOptions, type LandmarkStrategy, LandmarkTable, type LevelFeature, type LevelFeatureCollection, type LevelFeatureKind, type LevelFeatureProperties, type LevelInfo, type LevelKey, type LevelReachability, type LevelTable, type LevelTransition, type LevelsOption, LineFinder, type LineFinderOptions, type LineStringFeature, type ManyOptions, type ManyResult, type MatrixResult, type Metric, type MetricOption, type NearestResult, type NetworkCollection, type NetworkFeature, type NodeChainTable, type NodeIdContext, type NodeIdFunction, type NodeKey, type NodeTable, type OverlapReport, type PathAlgorithm, type PointConnector, type PointConnectorFunction, type PointFeature, type PointGeometry, type Position, type PropertyWeightOptions, type RepairReport, type ReverseEdgeTable, type RouteFailure, type RouteFailureDetail, type RouteFailureReason, type RouteLeg, type RouteOptions, type RouteResult, type RouteSection, type RouteSuccess, type RouteSummary, RoutingGraph, type SearchBudget, type SearchGraph, type SearchRequest, type SearchResult, SearchScratch, type SectionsDetail, type SegmentTable, type SerializeOptions, type SkippedWaypoint, type SnapConnectivity, type SnapCostMode, type SnapMode, type SnapOptions, type SnapSelection, type SnappedWaypoint, type SpeedWeightOptions, type StrongComponents, type TargetPath, type TransferableGraph, type TransferableLandmarks, type TravelDirection, type VertexTable, type VerticalConnector, type WaypointAccess, type WaypointContext, type WaypointInput, type WaypointObject, type WaypointRole, type WaypointSnapOptions, type WeightContext, type WeightFunction, type WeightResult, type ZeroWeight, astar, bidirectionalDijkstra, buildGraph, builtinAlgorithms, cheapRulerMetric, createAlgorithmRegistry, createPropertyWeight, createSpeedWeight, dijkstra, directional, distanceWeight, euclideanMetric, haversineDistance, haversineMetric, osmDirection, prepareLandmarks, reconstructPath, toLevelFeatures, toLineString };

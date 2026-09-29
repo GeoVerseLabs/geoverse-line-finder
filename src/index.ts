@@ -47,12 +47,14 @@ export type {
   VertexTable,
 } from './graph/graph';
 export type { StrongComponents } from './graph/scc';
-export type { GroupFunction, GroupKey } from './graph/topology';
+export type { GroupFunction, GroupKey, NodeIdContext, NodeIdFunction, NodeKey } from './graph/topology';
 export type {
   ConnectorDirection,
   LevelInfo,
   LevelTable,
   LevelsOption,
+  PointConnector,
+  PointConnectorFunction,
   VerticalConnector,
 } from './graph/levels';
 

@@ -1,5 +1,5 @@
-import type { Position } from '../types';
-import type { GroupKey } from './topology';
+import type { NetworkFeature, Position } from '../types';
+import type { GroupKey, NodeKey } from './topology';
 
 /**
  * What one connectivity group is, vertically. `ordinal` is what the routing engine reasons about (the
@@ -88,8 +88,12 @@ export interface VerticalConnector<P = unknown> {
   id?: string | number;
   /** Free-form; carried to `sections[].properties.kind` through the synthesised feature. */
   kind?: string;
-  /** Where the connector touches each level. A lift repeats one position; stairs give each landing. */
-  stops: readonly { group: GroupKey; position: Position }[];
+  /**
+   * Where the connector touches each level. A lift repeats one position; stairs give each landing. A stop
+   * with a `nodeId` joins the network vertex of that id on its level first (see the `nodeId` option), then
+   * falls back to its position.
+   */
+  stops: readonly { group: GroupKey; position: Position; nodeId?: NodeKey | null }[];
   /** One-off cost of a ride (waiting, getting in and out). Default `0`. */
   boardCost?: number;
   /** Cost per level crossed, by `|ordinal difference|`. Default `0`. */
@@ -98,3 +102,31 @@ export interface VerticalConnector<P = unknown> {
   direction?: ConnectorDirection;
   properties?: P;
 }
+
+/**
+ * What a `Point` feature is as a vertical connector (see {@link PointConnectorFunction}): the levels it
+ * stops at, all at the point's position, and the same costs as a {@link VerticalConnector}.
+ */
+export interface PointConnector {
+  /** Connectivity groups (levels) it serves; at least two. */
+  groups: readonly GroupKey[];
+  /** One-off cost of a ride. Default `0`. */
+  boardCost?: number;
+  /** Cost per level crossed, by `|ordinal difference|`. Default `0`. */
+  perLevelCost?: number;
+  /** `'up'` / `'down'` restrict travel to rising / falling ordinals. Default `'both'`. */
+  direction?: ConnectorDirection;
+}
+
+/**
+ * Turns `Point` features of the network into vertical connectors — a lift mapped as one point serving
+ * several levels, such as an OSM `highway=elevator` node tagged `level=0;1;2`. Return the levels it serves,
+ * or `null` / `undefined` to leave the point out of the graph as before. The connector keeps the point's
+ * feature index and properties (route sections point back at it); its stops join each level at the point's
+ * node id (`nodeId` option) or position.
+ */
+export type PointConnectorFunction<P = unknown> = (
+  properties: P,
+  featureIndex: number,
+  feature: NetworkFeature<P>,
+) => PointConnector | null | undefined;

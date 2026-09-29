@@ -1,5 +1,6 @@
 import { METERS_PER_DEGREE } from '../geo/metric';
 import type { Position } from '../types';
+import type { NodeKey } from './topology';
 
 const RAD = Math.PI / 180;
 const NONE = -1;
@@ -85,6 +86,8 @@ export class VertexStore {
   merged = 0;
   /** Distance to the vertex matched by the last successful {@link find} (`0` for identical coordinates). */
   lastDistance = 0;
+  /** Number of vertices that carry a node id. */
+  keyedCount = 0;
 
   private count = 0;
   private readonly tolerance: number;
@@ -103,6 +106,10 @@ export class VertexStore {
   private next: Int32Array;
   private mask: number;
   private entries = 0;
+  /** Vertex of every node id, per group (see {@link getOrAddKeyed}); only while building. */
+  private ids: Map<NodeKey, number>[] | null = null;
+  /** 1 for vertices that carry a node id. */
+  private keyed: Uint8Array | null = null;
 
   constructor(options: VertexStoreOptions, arrays?: { x: Float64Array; y: Float64Array; group: Int32Array }) {
     this.tolerance = options.tolerance > 0 ? options.tolerance : 0;
@@ -175,13 +182,45 @@ export class VertexStore {
   }
 
   /**
-   * Looks a coordinate up without inserting; `-1` when no vertex of `group` matches.
+   * Returns the vertex of node id `key` in `group`, whatever its coordinates. A key seen for the first time
+   * takes over a vertex without a key at this location (exact, or within tolerance), so that coordinates
+   * without ids still meet it, and otherwise starts a new vertex; it never joins a vertex carrying another
+   * key, however close. {@link lastDistance} is the gap bridged (for the merge log).
    */
-  find(px: number, py: number, group = 0): number {
+  getOrAddKeyed(position: Position, group: number, key: NodeKey): number {
+    const px = position[0];
+    const py = position[1];
+    const byKey = ((this.ids ??= [])[group] ??= new Map());
+    let id = byKey.get(key);
+    if (id !== undefined) {
+      this.merged++;
+      const sx = this.geographic ? METERS_PER_DEGREE * Math.max(Math.cos(py * RAD), 1e-6) : 1;
+      const sy = this.geographic ? METERS_PER_DEGREE : 1;
+      this.lastDistance = Math.hypot((px - this.x[id]) * sx, (py - this.y[id]) * sy);
+      return id;
+    }
+    id = this.find(px, py, group, true);
+    if (id !== NONE) this.merged++;
+    else id = this.append(px, py, position, group);
+    if (!this.keyed || this.keyed.length <= id)
+      this.keyed = resized(this.keyed ?? new Uint8Array(0), this.x.length);
+    this.keyed[id] = 1;
+    this.keyedCount++;
+    byKey.set(key, id);
+    return id;
+  }
+
+  /**
+   * Looks a coordinate up without inserting; `-1` when no vertex of `group` matches. `unkeyed` skips vertices
+   * that carry a node id.
+   */
+  find(px: number, py: number, group = 0, unkeyed = false): number {
     if (group < 0) return NONE;
+    const keyed = unkeyed ? this.keyed : null;
     if (this.tolerance === 0) {
       const slot = this.probe(px, py, group);
-      if (!this.inUse(slot)) return NONE;
+      // A vertex without a key always owns its location: every later coordinate there joins it.
+      if (!this.inUse(slot) || (keyed && keyed[this.head[slot]])) return NONE;
       this.lastDistance = 0;
       return this.head[slot];
     }
@@ -198,6 +237,7 @@ export class VertexStore {
         if (!this.inUse(slot)) continue;
         // Candidates are compared by (distance, id), so the order of a cell's list does not matter.
         for (let id = this.head[slot]; id !== NONE; id = this.next[id]) {
+          if (keyed && keyed[id]) continue;
           const dx = (px - this.x[id]) * sx;
           const dy = (py - this.y[id]) * sy;
           const d2 = dx * dx + dy * dy;
@@ -223,9 +263,12 @@ export class VertexStore {
   }
 
   /**
-   * Cuts the arrays down to {@link size}, so that a finished graph can share them.
+   * Cuts the arrays down to {@link size}, so that a finished graph can share them, and drops the node-id
+   * index, which only matters while building.
    */
   trim(): void {
+    this.ids = null;
+    this.keyed = null;
     this.x = resized(this.x, this.count);
     this.y = resized(this.y, this.count);
     this.group = resized(this.group, this.count);

@@ -71,12 +71,50 @@ export type GroupFunction<P = unknown> = (
   feature: NetworkFeature<P>,
 ) => GroupKey | readonly [GroupKey, GroupKey] | null | undefined;
 
+/** A node identifier from the source data: an OSM node id, an OpenSidewalks `_id`, a GTFS `stop_id`… */
+export type NodeKey = string | number;
+
+/** Where a coordinate sits, for {@link NodeIdFunction}. */
+export interface NodeIdContext<P = unknown> {
+  readonly featureIndex: number;
+  readonly feature: NetworkFeature<P>;
+  /** Part index within a MultiLineString (`0` for a LineString or a point). */
+  readonly part: number;
+  /** Coordinate index within the part. */
+  readonly index: number;
+  /** `index` is the last coordinate of the part. */
+  readonly last: boolean;
+  readonly position: Position;
+}
+
+/**
+ * Explicit topology: the node id of a coordinate, or `null` / `undefined` for none. Coordinates with the same
+ * id (in the same connectivity group) are one vertex, however far apart they are; a coordinate without an id
+ * is matched by its position (`tolerance`), as without this option. An id seen for the first time takes over
+ * a vertex without an id at its position, so both kinds of data connect — but a vertex never takes a second
+ * id: two ids at one position stay two vertices (a bridge over a road). Called for every valid coordinate
+ * except the interior of a connector feature (see {@link GroupFunction}), and for the point of a
+ * `pointConnector`.
+ */
+export type NodeIdFunction<P = unknown> = (
+  properties: P,
+  context: NodeIdContext<P>,
+) => NodeKey | null | undefined;
+
+/** Checks a node id returned by user code: `null` / `undefined` or a string / finite number. */
+export function checkNodeKey(key: unknown, where: string): key is NodeKey {
+  if (key === null || key === undefined) return false;
+  if (typeof key === 'string' || (typeof key === 'number' && Number.isFinite(key))) return true;
+  throw new TypeError(`Node ids must be strings or finite numbers, got ${String(key)} for ${where}.`);
+}
+
 export interface TopologyOptions {
   tolerance: number;
   snapDangles: number;
   splitIntersections: boolean;
   maxAbsLat: number;
   group?: GroupFunction<unknown>;
+  nodeId?: NodeIdFunction<unknown>;
   /** Keep a log of repairs and invalid coordinates for `RoutingGraph.diagnostics()`. */
   recordDiagnostics?: boolean;
   /** Extra segments injected after the network's own (vertical connectors); see {@link SyntheticSegment}. */
@@ -90,13 +128,16 @@ export interface TopologyOptions {
  * its costs are taken as given instead of from the weight function.
  */
 export interface SyntheticSegment {
-  /** Index of the synthesised source feature (past the end of the input collection). */
+  /** Source feature: a synthesised one past the end of the input collection, or a point connector. */
   featureIndex: number;
   part: number;
   from: Position;
   fromGroup: GroupKey;
+  /** Node id of the `from` stop (joins by id first, like a network coordinate). */
+  fromKey?: NodeKey;
   to: Position;
   toGroup: GroupKey;
+  toKey?: NodeKey;
   forward: number;
   backward: number;
 }
@@ -195,6 +236,7 @@ export function buildTopology(
     return index;
   };
   const geographic = metric.geographic;
+  const nodeId = options.nodeId;
 
   const features = network.features;
   for (let fi = 0; fi < features.length; fi++) {
@@ -269,7 +311,23 @@ export function buildTopology(
           continue;
         }
         const before = store.size;
-        const id = store.getOrAdd(c, ci === lastValid ? endGroup : startGroup);
+        const g = ci === lastValid ? endGroup : startGroup;
+        let id: number;
+        if (nodeId) {
+          const key = nodeId(feature.properties, {
+            featureIndex: fi,
+            feature,
+            part: pi,
+            index: ci,
+            last: ci === part.length - 1,
+            position: c,
+          });
+          id = checkNodeKey(key, `coordinate ${ci} of feature #${fi}`)
+            ? store.getOrAddKeyed(c, g, key)
+            : store.getOrAdd(c, g);
+        } else {
+          id = store.getOrAdd(c, g);
+        }
         if (repairs) {
           if (id === before) vertexFeature.push(fi);
           else if (store.lastDistance > 0) {
@@ -291,10 +349,15 @@ export function buildTopology(
 
   // Vertical connectors: a stop joins the level it serves exactly like a digitised end coordinate, so
   // merging, `tolerance` and `snapDangles` attach it to the floor network in the usual way.
+  // A stop with a node id joins by id first, like a network coordinate.
+  const stop = (position: Position, group: GroupKey, key: NodeKey | undefined) =>
+    key === undefined
+      ? store.getOrAdd(position, groupOf(group))
+      : store.getOrAddKeyed(position, groupOf(group), key);
   for (let i = 0; i < syntheticCount; i++) {
     const link = synthetic![i];
-    const a = store.getOrAdd(link.from, groupOf(link.fromGroup));
-    const b = store.getOrAdd(link.to, groupOf(link.toGroup));
+    const a = stop(link.from, link.fromGroup, link.fromKey);
+    const b = stop(link.to, link.toGroup, link.toKey);
     if (a === b) continue;
     segA[S] = a;
     segB[S] = b;
