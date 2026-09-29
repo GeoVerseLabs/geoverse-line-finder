@@ -4,7 +4,7 @@
 
 This project follows [Semantic Versioning](https://semver.org/); while in 0.x, minor versions may contain breaking changes.
 
-## 0.3.0 — Unreleased
+## 0.3.0 — 2026-09-29
 
 With default options (no `group` / `levels` / `nodeId` / `pointConnector`) the output is still bit-identical to 0.1.0 (golden tests unchanged), and the built graph — vertex numbering, segment order, chains, CSR, R-tree, diagnostics — is byte-for-byte what it was before the changes (new golden graphs in `test/graph-golden.test.ts`, 24 networks and configurations). The changes below only affect connectivity groups, level semantics, snap constraints and the new options.
 

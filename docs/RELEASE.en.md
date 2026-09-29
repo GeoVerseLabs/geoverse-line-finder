@@ -16,9 +16,10 @@
 
 - [x] The npm name `geoverse-line-finder` is free (the registry returned 404 on 2026-09-11).
 - [x] The `origin` remote is configured locally as `https://github.com/GeoVerseLabs/geoverse-line-finder.git`; first push: `git push -u origin main`.
-- [ ] Make the GitHub repository **public**: npm provenance only supports public repositories.
-- [ ] Create an npm granular access token with publish rights for this package only and store it as the repository secret `NPM_TOKEN`.
+- [x] Make the GitHub repository **public**: npm provenance only supports public repositories (checked 2026-09-29: the repository page answers 200 anonymously).
+- [x] Create an npm granular access token with publish rights for this package only and store it as the repository secret `NPM_TOKEN` (checked 2026-09-29: 0.1.0 and 0.2.0 on npm both carry SLSA provenance, i.e. `release.yml` published them).
 - [ ] (Optional) Add required reviewers to the `npm` environment under Settings → Environments so every release needs a manual approval; the environment is created automatically on the first run.
+- [x] GitHub Pages is enabled (`gh-pages` branch; https://geoverselabs.github.io/geoverse-line-finder/ answers 200, checked 2026-09-29).
 - [ ] (Optional) After the first release you can switch to npm Trusted Publishing (GitHub OIDC): register this repository and `release.yml` in the package settings on npm, upgrade npm in the workflow to 11.5 or later, then delete `NPM_TOKEN`.
 
 ## Every release
@@ -28,6 +29,16 @@
 3. Run everything locally first: `pnpm check && pnpm check:package`, then `npm pack --dry-run` to review the file list.
 4. Push `main` and wait for CI to turn green.
 5. `git tag vX.Y.Z && git push origin vX.Y.Z` — the Release pipeline publishes and creates the GitHub Release.
+
+## Release log
+
+| Version | Date       | Commit / tag                                   | Notes                                                                                                                                                               |
+| ------- | ---------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0.1.0   | 2026-09-11 | `v0.1.0` → `c9d208b`                           | first release                                                                                                                                                       |
+| 0.2.0   | 2026-09-14 | `v0.2.0` → `46a5e26`                           | roadmap M0–M5                                                                                                                                                       |
+| 0.3.0   | 2026-09-29 | `v0.3.0` → the `chore(release): v0.3.0` commit | multiple levels, faster builds, `nodeId` / `pointConnector`; playground map engine. `main` is pushed; pushing the tag (done by the maintainer) triggers the release |
+
+After a release, check that `npm view geoverse-line-finder version` shows the new version, `npm view geoverse-line-finder@<version> dist.attestations` carries provenance, GitHub Releases lists it, and the Pages site shows the latest playground.
 
 Emergency manual release: `npm publish` locally; `prepublishOnly` runs `pnpm check` and `pnpm check:package` first and aborts on any failure (manual releases carry no provenance).
 

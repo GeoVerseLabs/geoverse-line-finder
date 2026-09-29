@@ -16,9 +16,10 @@
 
 - [x] npm 包名 `geoverse-line-finder` 未被占用（2026-09-11 查询返回 404）。
 - [x] 本地已配置远端 `origin = https://github.com/GeoVerseLabs/geoverse-line-finder.git`；首次推送：`git push -u origin main`。
-- [ ] GitHub 仓库设为 **public**：npm provenance 只支持公开仓库。
-- [ ] 在 npm 创建发布用的 granular access token（只授予本包的 publish 权限），存为仓库 Secret `NPM_TOKEN`。
+- [x] GitHub 仓库设为 **public**：npm provenance 只支持公开仓库（2026-09-29 核实：匿名访问仓库页返回 200）。
+- [x] 在 npm 创建发布用的 granular access token（只授予本包的 publish 权限），存为仓库 Secret `NPM_TOKEN`（2026-09-29 核实：npm 上 0.1.0 / 0.2.0 都带 SLSA provenance，即由 `release.yml` 发布成功）。
 - [ ] （可选）Settings → Environments 里给 `npm` 环境配置审批人，发布前需人工批准；该环境在首次运行时自动创建。
+- [x] GitHub Pages 已启用（`gh-pages` 分支，https://geoverselabs.github.io/geoverse-line-finder/ 返回 200，2026-09-29 核实）。
 - [ ] （可选）首发之后可改用 npm Trusted Publishing（GitHub OIDC）：在 npm 包设置里登记本仓库与 `release.yml`，把工作流里的 npm 升到 11.5 以上后即可删除 `NPM_TOKEN`。
 
 ## 每次发版
@@ -28,6 +29,16 @@
 3. 本地先过一遍：`pnpm check && pnpm check:package`，再 `npm pack --dry-run` 核对清单。
 4. 推送 `main`，等 CI 变绿。
 5. `git tag vX.Y.Z && git push origin vX.Y.Z`，Release 流水线自动发布并创建 GitHub Release。
+
+## 发版记录
+
+| 版本  | 日期       | 提交 / tag                               | 备注                                                                                                         |
+| ----- | ---------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 0.1.0 | 2026-09-11 | `v0.1.0` → `c9d208b`                     | 首发                                                                                                         |
+| 0.2.0 | 2026-09-14 | `v0.2.0` → `46a5e26`                     | 路线 M0–M5                                                                                                   |
+| 0.3.0 | 2026-09-29 | `v0.3.0` → `chore(release): v0.3.0` 提交 | 多楼层、建图提速、`nodeId` / `pointConnector`；示例站接入地图引擎。`main` 已推送，tag 由维护者推送后触发发布 |
+
+发布后核对：`npm view geoverse-line-finder version` 为新版本、`npm view geoverse-line-finder@<版本> dist.attestations` 带 provenance、GitHub Releases 出现对应条目、Pages 站点为最新示例。
 
 应急手动发布：本地 `npm publish`，`prepublishOnly` 会先跑 `pnpm check` 与 `pnpm check:package`，任何一步失败即中止（手动发布不带 provenance）。
 
