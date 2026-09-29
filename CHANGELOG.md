@@ -4,9 +4,32 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)；0.x 期间，次版本号可能包含不兼容变更。
 
-## 未发布
+## 0.3.0 — 未发布
 
-默认配置（不用 `group` / `levels`）下的输出仍与 0.1.0 逐位相同（金样本测试不变）。以下只影响使用连通分组、楼层语义或吸附约束的场景。
+默认配置（不用 `group` / `levels` / `nodeId` / `pointConnector`）下的输出仍与 0.1.0 逐位相同（金样本测试不变）；建图产物——顶点编号、线段顺序、链、CSR、R 树、诊断——与改动前逐字节相同（新增建图金样本 `test/graph-golden.test.ts`，覆盖 24 种路网与配置）。以下只影响使用连通分组、楼层语义、吸附约束或新选项的场景。
+
+### 性能：建图提速
+
+13.5 万坐标的 OSM 路网上，建图相对 0.2.0：默认配置 **2.05 倍**、OSM 通行时间权重 1.99 倍、`tolerance: 1.1` 1.45 倍、`snapDangles + splitIntersections` 1.58 倍（7 组，每组连续建图 5 次取平均，双方都用构建产物，区间均不重叠；另一次 5 组复测为 2.16 / 2.07 / 1.30 / 1.50 倍；`pnpm bench:features --only build --against <0.2.0 的 dist/index.js>`，见 [docs/BENCHMARK.md](docs/BENCHMARK.md) §5.7）。输出不变。
+
+- **顶点去重**：嵌套 `Map` 换成开放寻址哈希表，键与占用位图平铺在类型化数组里；精确模式按坐标的位模式哈希（`-0` 与 `+0` 视为同一坐标，与原先一致），容差模式按网格格子哈希，3×3 邻域里不存在的格子只查一张小位图。
+- **R 树打包**：按 Hilbert 值排序改为稳定的 8 位基数排序，去掉每次比较都调用的闭包；结果与"按 (Hilbert 值, 序号) 排序"完全相同。
+- **预分配**：拓扑与链压缩按已知上界预分配类型化数组，不再 `push` 后再 `Int32Array.from`；不开修复时跳过整个修复阶段；图直接共享顶点库裁剪后的坐标数组；默认长度权重不再逐段构造 `WeightContext`。
+- 反序列化（`RoutingGraph.fromTransferable`）同样直接在传入的缓冲区上建哈希表，不再逐顶点插入嵌套 `Map`。
+
+### 新增：按节点编号连接（显式拓扑）
+
+- **`nodeId` 建图选项**：`(properties, { featureIndex, feature, part, index, last, position }) => 编号 | null | undefined`。同一分组内编号相同的坐标即同一顶点，坐标差多远都一样（顶点位置取首次出现的坐标）；返回 `null` / `undefined` 的坐标照旧按位置与 `tolerance` 合并。新出现的编号会先接管同一位置上**没有编号**的顶点，所以带编号与不带编号的数据能接上；**不同编号永不合并**——OSM 立交（桥与桥下道路不共享节点）因此不会被坐标重合接在一起。编号按连通分组区分；连接要素的中间坐标不调用 `nodeId`。
+- `diagnostics: true` 时，按编号跨越缝隙的合并以 `merge` 修复记录报告缝隙宽度，便于发现编号冲突或坐标偏差。
+- 编号与坐标一致时，建出的图与只用坐标时逐字节相同（差分测试覆盖 GPF 路网、随机网格含修复、多楼层楼栋与 13.5 万坐标 OSM 路网，各含"全部坐标带编号"与"随机一半要素带编号"两种）。
+- `stats.nodeIds`：带编号的顶点数。
+
+### 新增：点要素竖向连接器
+
+- **`pointConnector` 建图选项**：`(properties, featureIndex, feature) => { groups, boardCost?, perLevelCost?, direction? } | null`，把 `Point` 要素（如 OSM `highway=elevator` + `level=0;1;2`）展开为站间全连的竖向连接器，代价语义与 `verticalConnectors` 完全相同（有测试断言两者建出的图除线段来源外逐字节相同）。连接器沿用该点要素的下标与属性：路线里乘梯那一段的 `featureIndex` / `id` / `properties` 指回这个点，`graph.features` 不追加合成要素。
+- 站点优先按该点的节点编号（`nodeId`）接上各层，否则按坐标 / `tolerance`；接没接上用 `graph.diagnostics().connectorEnds` 查（报告里的要素就是这个点）。
+- `verticalConnectors` 的站点也可以写 `nodeId`。
+- `stats.pointConnectors`：被转成连接器的点要素数；它们不再计入 `stats.skippedFeatures`。
 
 ### 新增：多楼层语义
 
@@ -42,7 +65,9 @@
 - 拓扑诊断：连接要素不再报共线重叠（逐层重叠的楼梯本来就是这样画的）；悬挂端点的近距离未接通只看整段都在同组的线段，与 `snapDangles` 修复口径一致。
 - `stats` 新增 `verticalConnectors`（展开出来的合成要素数量）；配了 `verticalConnectors` 时 `stats.features` 与 `graph.features.length` 包含它们。
 - `GRAPH_FORMAT_VERSION` 由 1 改为 2（这一版能写的最新格式），新增 `GRAPH_FORMAT_VERSIONS`（能读的全部格式）。没有楼层语义的图仍写 1。
-- **体积门禁上调**：consumer 29 000 → 33 500 B、IIFE 30 500 → 36 000 B。实测 27.8 → 31.8 KB / 29.7 → 34.0 KB gzip，多出来的 4.1 KB 全部是这一版的楼层层（分组索引 +0.7 KB、楼层语义 +3.4 KB）。结果转换 `toLevelFeatures` 是独立导出，不使用的话不计入。
+- `verticalConnectors` 的站点坐标现在会校验：不是有效坐标时抛 `TypeError`（此前会生成 NaN 顶点）。
+- 从 0.2.0 序列化出来的图反序列化后，`stats` 里缺的新计数（`verticalConnectors` / `pointConnectors` / `nodeIds`）补为 0。
+- **体积门禁上调**：consumer 29 000 → 35 500 B、IIFE 30 500 → 38 000 B。实测 0.2.0 → 0.3.0：consumer 27 759 → 34 581 B、IIFE 29 663 → 36 906 B gzip。其中楼层层约 +4.8 KB（分组索引、楼层语义），建图提速约 +1.7 KB（哈希表顶点库、基数排序、预分配），按节点编号连接与点要素连接器约 +0.3 KB。这些都在 `buildGraph` / `LineFinder` 的路径上，无法摇树；结果转换 `toLevelFeatures` 是独立导出，不使用的话不计入。
 
 ## 0.2.0 — 2026-09-14
 

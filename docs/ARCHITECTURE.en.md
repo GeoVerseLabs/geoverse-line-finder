@@ -31,6 +31,8 @@ NetworkCollection ──► topology.ts ─────────────�
   (LineString /        │ extract segments (feature/part/     │ weights → forward/backward     │ lazy: strong components, reverse CSR,
    MultiLineString)    │   coordinate order)                 │ measures along each part       │       node→chain index, vertex/node R-trees
                        │ VertexStore merging per group       │ chains.ts: degree-2 → chains   │ diagnostics() / toTransferable()
+                       │   (hash table; nodeId ids first,    │
+                       │   coordinates as the fallback)      │
                        │ coordinate-range / antimeridian     │ directed CSR, weak components
                        │   guards                            │ A* heuristic data
                        │ ConnectivityRepair (within groups)  │ segment R-tree (for snapping)
@@ -50,25 +52,25 @@ LineFinder.oneToMany / matrix ──► many.ts (one-to-many costs from a single
 
 ### 2.1 Directory
 
-| Path                        | Responsibility                                                                                                                  |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `src/types.ts`              | minimal structural GeoJSON types (no dependency on `@types/geojson`, but compatible) and waypoint input types                   |
-| `src/geo/metric.ts`         | metrics: haversine / cheap-ruler / euclidean / custom; `embed` provides the admissible heuristic                                |
-| `src/geo/segment.ts`        | point-to-segment projection, segment intersection                                                                               |
-| `src/heap/`                 | `Heap` interface + 4-ary heap (from terra-route, MIT)                                                                           |
-| `src/spatial/rtree.ts`      | static packed Hilbert R-tree (layout from flatbush, ISC) with exact-distance best-first nearest search; rebuildable from arrays |
-| `src/graph/vertex-store.ts` | vertex deduplication / merging per connectivity group                                                                           |
-| `src/graph/topology.ts`     | segment extraction, input guards, connectivity repair (union-find merges + split requests sorted by t), repair log              |
-| `src/graph/chains.ts`       | degree-2 compaction                                                                                                             |
-| `src/graph/build.ts`        | build pipeline: weights, measures, chains, CSR, components, heuristic data, R-tree                                              |
-| `src/graph/graph.ts`        | read-only graph (flat typed arrays) and lazy derived indexes                                                                    |
-| `src/graph/scc.ts`          | iterative Tarjan strongly connected components                                                                                  |
-| `src/graph/diagnostics.ts`  | topology diagnostics                                                                                                            |
-| `src/graph/serialize.ts`    | transferable graph format                                                                                                       |
-| `src/weight/weight.ts`      | GPF-compatible weight contract + presets                                                                                        |
-| `src/algorithm/`            | engine contract, scratch, shared best-first core, Dijkstra, A\*, bidirectional Dijkstra, ALT landmarks, registry                |
-| `src/snap/snap.ts`          | candidate model, anchors, strong-component keys                                                                                 |
-| `src/route/`                | options, overlay, search wiring, both selectors, one-to-many, result assembly, `LineFinder` facade, GeoJSON output              |
+| Path                        | Responsibility                                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `src/types.ts`              | minimal structural GeoJSON types (no dependency on `@types/geojson`, but compatible) and waypoint input types                    |
+| `src/geo/metric.ts`         | metrics: haversine / cheap-ruler / euclidean / custom; `embed` provides the admissible heuristic                                 |
+| `src/geo/segment.ts`        | point-to-segment projection, segment intersection                                                                                |
+| `src/heap/`                 | `Heap` interface + 4-ary heap (from terra-route, MIT)                                                                            |
+| `src/spatial/rtree.ts`      | static packed Hilbert R-tree (layout from flatbush, ISC) with exact-distance best-first nearest search; rebuildable from arrays  |
+| `src/graph/vertex-store.ts` | vertex deduplication / merging per connectivity group: open-addressing hash table (exact coordinates / tolerance grid), node ids |
+| `src/graph/topology.ts`     | segment extraction, input guards, connectivity repair (union-find merges + split requests sorted by t), repair log               |
+| `src/graph/chains.ts`       | degree-2 compaction                                                                                                              |
+| `src/graph/build.ts`        | build pipeline: weights, measures, chains, CSR, components, heuristic data, R-tree                                               |
+| `src/graph/graph.ts`        | read-only graph (flat typed arrays) and lazy derived indexes                                                                     |
+| `src/graph/scc.ts`          | iterative Tarjan strongly connected components                                                                                   |
+| `src/graph/diagnostics.ts`  | topology diagnostics                                                                                                             |
+| `src/graph/serialize.ts`    | transferable graph format                                                                                                        |
+| `src/weight/weight.ts`      | GPF-compatible weight contract + presets                                                                                         |
+| `src/algorithm/`            | engine contract, scratch, shared best-first core, Dijkstra, A\*, bidirectional Dijkstra, ALT landmarks, registry                 |
+| `src/snap/snap.ts`          | candidate model, anchors, strong-component keys                                                                                  |
+| `src/route/`                | options, overlay, search wiring, both selectors, one-to-many, result assembly, `LineFinder` facade, GeoJSON output               |
 
 `src/` must not depend on Node built-ins (enforced twice: an ESLint rule and a `tsconfig.lib.json` without Node typings), so it runs in browsers, workers and Node; there are no runtime dependencies.
 
@@ -161,6 +163,11 @@ A target inside a chain can only be entered and left through the chain's ends, s
 | Vertex merging      | `tolerance` (meters / planar units) | grid cells ≥ tolerance; check the 3×3 neighbourhood with the real distance; longitude cells widened for the network's highest latitude; merges only within a group                                            | GPF's rounding cannot merge two points that straddle a rounding boundary, even 0.02 m apart (tested) |
 | Dangling-end repair | `snapDangles`                       | a degree-1 vertex snaps to the nearest segment within the threshold (ignoring its own segment and its only neighbour's segments, so short spurs don't fold back), and that segment is split at the projection | the common "almost connected" T-junction in digitised data                                           |
 | Crossing splits     | `splitIntersections`                | R-tree candidate pairs; X crossings get a new vertex, T touches reuse the existing endpoint; connectors (ends in different groups) take no part                                                               | data without shared vertices at junctions; keep overpasses and floors apart with `group`             |
+| Explicit topology   | `nodeId`                            | the same id in the same group is one vertex; a new id first takes over the vertex **without an id** at its position, otherwise starts one; different ids never merge                                          | standard data (OSM, OpenSidewalks, GTFS) states topology through ids, and overpasses share no node   |
+
+**The vertex store**: one open-addressing hash table whose keys (coordinates or grid cell, plus the group) and occupancy bitmap live in typed arrays. Exact mode hashes the coordinates' bit patterns (`+ 0` folds `-0` into `+0`, matching the SameValueZero keys of the `Map`s used before); tolerance mode hashes grid cells, each the head of a list of its vertices, looks at the 3×3 neighbourhood, and answers the cells that do not exist from the bitmap without touching the large arrays; candidates are taken by minimum (distance, vertex id), independent of list order. "The first vertex at a location owns it" holds in both modes, while building and after deserialising.
+
+**Ids first, coordinates as the fallback**, in full: a coordinate with an id looks up `(group, id)` and uses that vertex if it exists (however far apart the coordinates are; the vertex keeps the first position seen, and `diagnostics` logs a `merge` with the gap); an id seen for the first time takes over the vertex **without an id** at its position (exact, or within tolerance) and only otherwise starts a new one — a vertex carries at most one id, so two different ids at one position are necessarily two vertices. A coordinate without an id looks up any vertex at its position, as before. In exact mode a vertex without an id, if there is one, is always the owner of its location (every later coordinate there joins it), so the takeover only has to look at the owner. The interior coordinates of connectors are not passed to `nodeId` and still never merge. Ids are used while building only: `trim()` drops them and they are not serialised.
 
 All merges go into a union-find and all splits become `(t, vertex)` requests that are applied in one go at the end — detection always works on the original segment ids, so nothing shifts while it is being examined. A dead end with a zero gap (lying exactly on a segment) leaves the union-find unchanged, but its split creates the connection, so it counts in `danglesSnapped`.
 
@@ -240,13 +247,15 @@ The topology stage emits segments in "feature → part → coordinate" order, wi
 
 ### 7.2 Connectivity groups
 
-A vertex is identified by "group + coordinate": the `VertexStore` keeps a separate exact map or grid per group, and merging and both repairs happen within a group only. A connector feature, for which `group` returns `[startGroup, endGroup]`, puts the first coordinate of every part into the start group and the last into the end group, so an elevator drawn as a zero-length line becomes a segment between two distinct vertices. The interior coordinates (the steps and landings of a staircase) belong to **no group** (`-1`): they are not indexed by the `VertexStore` and never merge with another vertex (only an immediately repeated coordinate is reused), and both repairs and the overlap diagnostic skip them; a location inside a segment whose ends lie in different groups belongs to no group either, so no `group` constraint accepts it. A staircase therefore neither merges with the floor vertices it passes over nor short-circuits where a switchback overlaps itself in plan. Its length is 0 and so is its default weight, which means impassable: it needs `zeroWeight: 'free'` or a fixed custom weight. Candidate descriptions carry the group, and per-waypoint `snap.group` and `findVertex(x, y, group)` restrict to one.
+A vertex is identified by "group + coordinate" (with `nodeId`, "group + id" comes first): the group is part of every `VertexStore` hash key, and merging and both repairs happen within a group only. A connector feature, for which `group` returns `[startGroup, endGroup]`, puts the first coordinate of every part into the start group and the last into the end group, so an elevator drawn as a zero-length line becomes a segment between two distinct vertices. The interior coordinates (the steps and landings of a staircase) belong to **no group** (`-1`): they are not indexed by the `VertexStore` and never merge with another vertex (only an immediately repeated coordinate is reused), and both repairs and the overlap diagnostic skip them; a location inside a segment whose ends lie in different groups belongs to no group either, so no `group` constraint accepts it. A staircase therefore neither merges with the floor vertices it passes over nor short-circuits where a switchback overlaps itself in plan. Its length is 0 and so is its default weight, which means impassable: it needs `zeroWeight: 'free'` or a fixed custom weight. Candidate descriptions carry the group, and per-waypoint `snap.group` and `findVertex(x, y, group)` restrict to one.
 
 ### 7.2.1 Level semantics
 
 `group` says which vertices may connect; `levels` says what a group is vertically. They are deliberately separate — overpasses and multi-building campuses need only the first. `levels` resolves to three per-group tables (`ordinal` / `elevation` / `name`, `NaN` where unknown), kept on the graph together with a lazy `nodeOrdinals()` and a per-vertex elevation. Per-vertex elevation is filled from the group, and the group-less interior of a connector is **interpolated by length between the two ends**; `WeightContext.rise`, `verticalDistance` and `output: { z: 'elevation' }` all read from it.
 
 `verticalConnectors` are expanded into **synthetic segments** before the topology is built: one per pair of stops, costing `boardCost + |Δordinal| × perLevelCost`, injected into the segment table with that budgeted cost and never passed to the weight function. A stop is `getOrAdd`-ed into its group exactly like a digitised end coordinate, so merging, `tolerance` and `snapDangles` attach it to the floor network in the usual way. The matching synthetic features are appended after the input collection, and `sections[].featureIndex` / `properties` point at them.
+
+`pointConnector` goes through the same expansion (`expandConnector`): a `Point` feature for which it returns `{ groups, … }` gets one stop per group, all at the point's position, and the synthetic segments' source feature is the point itself (nothing is appended); they come after the network's own segments and before `verticalConnectors`. A stop carrying the point's id (`nodeId`) attaches to its floor by `(group, id)`, otherwise by position. It therefore builds the same graph as the equivalent `verticalConnectors` except for the segments' source feature (compared byte for byte in a test), and neither the `perLevel` derivation, the diagnostics nor serialisation need to tell the two apart.
 
 The **level-aware bound** changes only the geometric term and is injected through `SearchRequest.heuristic`, so the engine contract is untouched; ALT takes `max(geometric, landmark)` and stacks on top automatically:
 
@@ -264,13 +273,13 @@ With `diagnostics: true` the build also logs repairs (merge / dangling end / spl
 
 ### 7.4 Serialisation
 
-`toTransferable()` copies every table, the R-tree arrays, the group keys and the diagnostics log into standalone `ArrayBuffer`s (`SharedArrayBuffer`s with `shared: true`), with a header carrying the format name, version and a layout by name; the original graph is untouched and the buffers can be the `postMessage` transfer list. `fromTransferable()` checks the format, the version and every buffer's byte length, restores the tables as **zero-copy** typed-array views, rebuilds the `VertexStore` by appending the vertices in their original order (so ids and merging behave identically) and restores the R-tree with `PackedRTree.fromData`. Built-in metrics are rebuilt from their name and reference latitude; a custom metric must be passed in by the caller under the same name. Feature properties are not serialised; pass the original features when `sections.properties` is needed. Landmark tables serialise separately.
+`toTransferable()` copies every table, the R-tree arrays, the group keys and the diagnostics log into standalone `ArrayBuffer`s (`SharedArrayBuffer`s with `shared: true`), with a header carrying the format name, version and a layout by name; the original graph is untouched and the buffers can be the `postMessage` transfer list. `fromTransferable()` checks the format, the version and every buffer's byte length, restores the tables as **zero-copy** typed-array views, rebuilds the `VertexStore`'s hash index directly over the received coordinate arrays, in vertex order (`VertexStore.fromArrays`, no copies; so ids, location owners and merging behave identically) and restores the R-tree with `PackedRTree.fromData`. Built-in metrics are rebuilt from their name and reference latitude; a custom metric must be passed in by the caller under the same name. Feature properties are not serialised; pass the original features when `sections.properties` is needed. Landmark tables serialise separately.
 
 ## 8. Correctness, and the root cause of GPF's non-shortest routes
 
 Tests come in layers (`pnpm test`):
 
-1. **Golden outputs**: `test/fixtures/golden-0.1.0.json` was generated by 0.1.0 on the GPF networks, random grids (with repairs and without compaction), the synthetic warehouse and the large OSM network; with default options every result field that existed in 0.1.0 (including `settled` / `relaxed`) must stay bit-identical.
+1. **Golden outputs**: `test/fixtures/golden-0.1.0.json` was generated by 0.1.0 on the GPF networks, random grids (with repairs and without compaction), the synthetic warehouse and the large OSM network; with default options every result field that existed in 0.1.0 (including `settled` / `relaxed`) must stay bit-identical. **Golden graphs** (0.3.0): `test/fixtures/graph-golden.json`, generated before the build optimisations, hashes every serialised buffer, the lazy R-trees and the diagnostics of 24 networks and configurations (tolerance, repairs, multiple levels, the large network) byte for byte — vertex numbering, segment order, R-tree packing and CSR order decide which of several equal routes a search returns, which a route-level test only notices when two routes happen to tie, so they are pinned at the graph level.
 2. **Unit**: heap, R-tree (against brute force), metrics (embedding lower-bound property), vertex merging, weight contract, strongly connected components (against mutual reachability), landmark tables (against a naive full search).
 3. **Differential**: on random grids (cost factors 0.5–2.5, one-way streets, closures, jittered shape points) Dijkstra / A\* × compacted / flat are compared pair by pair with a naive reference implementation that **shares no code**, and every returned path is re-priced edge by edge; for segment snapping the snapped points are inserted into the reference network first; optimal selection (with pass-through) is compared with a brute force; ALT, bidirectional Dijkstra and one-to-many agree with the built-ins query by query.
 4. **Parity**: every assertion of GPF's own test suite; on large-network.json the results match an independent referee exactly and are never worse than GPF.
@@ -288,7 +297,8 @@ If a more expensive direct edge already exists (a parallel road, the opposite ca
 
 - Networks crossing the ±180° meridian are not supported: since 0.2.0 the build rejects them.
 - `splitIntersections` does not handle collinear overlaps (`diagnostics().overlaps` lists them); when three lines meet at one point with `tolerance = 0`, the floating-point intersections may not be bit-identical, so combine it with a tiny tolerance.
-- Vertex merging keeps the first vertex as the representative and is not transitive (with A≈B and B≈C but A≉C, C is not merged into A), so feature order can affect the topology; `diagnostics` shows every merge.
+- Vertex merging keeps the first vertex as the representative and is not transitive (with A≈B and B≈C but A≉C, C is not merged into A), so feature order can affect the topology; `diagnostics` shows every merge. With `nodeId`, several vertices with different ids can share a position; a coordinate without an id joins the first of them.
+- `splitIntersections` still queries the R-tree segment by segment; monotone-chain noding (the JTS `MCIndexNoder` idea) would change the order in which candidates are visited and could swap one of several equal routes for another, so it needs its own golden analysis and is not done yet.
 - Landmarks are only placed in the largest weakly connected component; queries elsewhere keep their results and simply are not accelerated.
 - Bidirectional Dijkstra falls back to a single-direction search for multi-target requests and `maxCost`.
 - Serialisation keeps the first three coordinate dimensions; custom metrics must be supplied again when deserialising.

@@ -10,17 +10,19 @@ This release adds that **level semantics** layer. The engine contract (`SearchGr
 
 ## 1. What is new
 
-| Capability                      | Entry point                                                                          | Problem it solves                                                                                       |
-| ------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| Level metadata                  | `levels` (build option)                                                              | Groups gain a storey number, a height and a display name                                                |
-| Level-aware A\* bound           | Automatic (`graph.heuristic.perLevel`)                                               | A long climb no longer floods the start and intermediate floors: 883 → 30 settled nodes over 30 storeys |
-| Declarative vertical connectors | `verticalConnectors` (build option)                                                  | One ride is one section, and the boarding cost is charged once, not per floor                           |
-| Pricing by climb                | `rise` / `fromGroup` / `toGroup` on `WeightContext`                                  | Stairs can be priced by the actual climb rather than by their plan length                               |
-| Levels in the result            | `section.level`, `leg.levels`, `leg.transitions`, `levelChanges`, `verticalDistance` | Where the route changes level, by how many storeys, and how much it climbs                              |
-| Per-level rendering             | `toLevelFeatures(result)` (separate export, tree-shaken when unused)                 | An indoor map shows one floor at a time; this is its direct input                                       |
-| z output                        | `output: { z: 'elevation' }`                                                         | Path coordinates carry the height, ready for a 3D view                                                  |
-| Level diagnostics               | `diagnostics().connectorEnds / levelReachability / missingOrdinals`                  | Lifts that never reached their floor, levels that cannot reach each other, levels without an ordinal    |
-| Format 2 serialisation          | `toTransferable()` switches automatically                                            | Level data and synthesised connectors travel to a worker with the graph                                 |
+| Capability                       | Entry point                                                                          | Problem it solves                                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| Level metadata                   | `levels` (build option)                                                              | Groups gain a storey number, a height and a display name                                                |
+| Level-aware A\* bound            | Automatic (`graph.heuristic.perLevel`)                                               | A long climb no longer floods the start and intermediate floors: 883 → 30 settled nodes over 30 storeys |
+| Declarative vertical connectors  | `verticalConnectors` (build option)                                                  | One ride is one section, and the boarding cost is charged once, not per floor                           |
+| Lifts as points (0.3.0)          | `pointConnector` (build option)                                                      | The data maps a lift as one point (OSM `highway=elevator`): use it as is                                |
+| Floors joined by node id (0.3.0) | `nodeId` (build option), stop `nodeId`                                               | Every floor attaches at the lift's node by its id, without needing identical coordinates                |
+| Pricing by climb                 | `rise` / `fromGroup` / `toGroup` on `WeightContext`                                  | Stairs can be priced by the actual climb rather than by their plan length                               |
+| Levels in the result             | `section.level`, `leg.levels`, `leg.transitions`, `levelChanges`, `verticalDistance` | Where the route changes level, by how many storeys, and how much it climbs                              |
+| Per-level rendering              | `toLevelFeatures(result)` (separate export, tree-shaken when unused)                 | An indoor map shows one floor at a time; this is its direct input                                       |
+| z output                         | `output: { z: 'elevation' }`                                                         | Path coordinates carry the height, ready for a 3D view                                                  |
+| Level diagnostics                | `diagnostics().connectorEnds / levelReachability / missingOrdinals`                  | Lifts that never reached their floor, levels that cannot reach each other, levels without an ordinal    |
+| Format 2 serialisation           | `toTransferable()` switches automatically                                            | Level data and synthesised connectors travel to a worker with the graph                                 |
 
 > One older behaviour was fixed along the way: with `connectors: 'legs'`, `sections[].start/end` did not move with the connector prepended to the leg and pointed at the wrong coordinates. `sections`, `transitions` and `levels` now all index `leg.path` consistently. See [Upgrading](UPGRADING.en.md).
 
@@ -138,6 +140,34 @@ The library expands this into an **all-stops-connected** set of links: every pai
 - A stop's coordinate joins its floor exactly like a digitised end coordinate: identical coordinates merge, otherwise it becomes an isolated vertex (which `connectorEnds` reports).
 - `perLevelCost` and `direction` use ordinals, so those groups must have one in `levels`, or the build throws.
 - n stops produce n(n−1)/2 segments. A 30-storey building with four lifts is about 1 700 — fine indoors. Above roughly 60 stops per shaft, consider a different model.
+- A stop may carry a `nodeId`: it joins the network vertex with that id on its floor first, then falls back to its position (see §3.4).
+
+### 3.4 Lifts as points, floors joined by node id (0.3.0)
+
+In OSM-style data a lift is a **point**: a `highway=elevator` node tagged `level=0;1;2`, which the footways of every floor use as an end node. `pointConnector` turns such a point into a vertical connector directly:
+
+```ts
+const finder = new LineFinder(osmIndoor, {
+  group: (p) => Number(p.level), // lines: every footway lies on one floor
+  levels: (g) => (typeof g === 'number' ? { ordinal: g, elevation: g * 4 } : undefined),
+
+  // points → vertical connectors; points returning null stay skipped (doors, gates, points of interest)
+  pointConnector: (p) =>
+    p.highway === 'elevator'
+      ? { groups: p.level.split(';').map(Number), boardCost: 30, perLevelCost: 3 }
+      : null,
+
+  // every coordinate of a line is an OSM node; a point's id is the lift node itself
+  nodeId: (p, { index }) => p.nodes?.[index] ?? p.node,
+});
+```
+
+- The cost semantics are exactly those of `verticalConnectors` (all stops connected, `boardCost` once, one-way `direction`) — a test asserts both build byte-identical graphs apart from the segments' source feature.
+- The connector **keeps the point feature itself**: the ride's `featureIndex` / `id` / `properties` point back at the point, nothing is appended to `graph.features`, `stats.pointConnectors` counts the converted points and they no longer count in `skippedFeatures`.
+- Stops attach to their floor **by id first** (with `nodeId`, the point's id stands for one vertex on each floor — ids are scoped by connectivity group), then by position / `tolerance`. So a footway end digitised tens of centimetres away from the lift point still connects as long as the ids agree; `connectorEnds` still tells you whether it did, naming the point.
+- Fewer than two `groups`, an invalid point coordinate, or a group key that is not a string or number throws at build time; `perLevelCost` and `direction` need an `ordinal` in `levels`, as before.
+
+`nodeId` itself is not specific to levels: it is the general "explicit topology" option — the same id is the same vertex, coordinates and `tolerance` are the fallback, and different ids never merge (overpasses). See "Connecting by node id" in the README.
 
 ---
 
@@ -339,7 +369,7 @@ An older build reading `formatVersion: 2` fails loudly instead of silently dropp
 
 - **Default output is unchanged**: a network built without `levels` is byte-identical to 0.1.0 / 0.2.0 (guarded by golden-sample tests). Level fields appear only when it is on, and `toLevelFeatures` is a separate export that tree-shakes away.
 - **The engine contract is untouched**: `SearchGraph` / `PathAlgorithm` did not change. The level bound is built inside the library and injected through `heuristic`, so custom engines need no changes.
-- **Size**: +4.1 KB gzip on the core path (consumer 27.8 → 31.8 KB, IIFE 29.7 → 34.0 KB).
+- **Size**: the level layer adds about 4.8 KB gzip on the core path (0.2.0's consumer bundle 27 759 B → 32 544 B with levels); for 0.3.0 as a whole see the CHANGELOG.
 - **Out of scope**: a 3D distance engine; time-dependent costs (lift waiting by time of day, escalators reversing on a schedule); turn costs; deriving a network skeleton from polygon-only data such as IMDF.
 
 ---

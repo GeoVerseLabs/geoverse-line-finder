@@ -10,17 +10,19 @@
 
 ## 一、这一版新增了什么
 
-| 能力                | 入口                                                                                 | 解决的问题                                                 |
-| ------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
-| 楼层元数据          | `levels`（建图选项）                                                                 | 分组有了楼层序号、标高和显示名                             |
-| 楼层感知的 A\* 下界 | 自动启用（`graph.heuristic.perLevel`）                                               | 竖向长途不再把起点层和中间层铺满，30 层实测展开数 883 → 30 |
-| 声明式竖向连接器    | `verticalConnectors`（建图选项）                                                     | 一次乘坐 = 一段，上下梯代价只计一次，不再逐层重复计        |
-| 按爬升计价          | `WeightContext` 的 `rise` / `fromGroup` / `toGroup`                                  | 楼梯可以按真实爬升定价，而不是按平面长度                   |
-| 结果里的楼层        | `section.level`、`leg.levels`、`leg.transitions`、`levelChanges`、`verticalDistance` | 看得出在哪儿换层、换了几层、爬升多少                       |
-| 按层渲染            | `toLevelFeatures(result)`（独立导出，不用就被摇掉）                                  | 室内地图一次只显示一层，这是直接输入                       |
-| 输出 z              | `output: { z: 'elevation' }`                                                         | 路径坐标带上标高，可直接喂三维视图                         |
-| 楼层诊断            | `diagnostics().connectorEnds / levelReachability / missingOrdinals`                  | 电梯没接上楼层、哪些层互相不可达、哪些层缺序号             |
-| 序列化 v2           | `toTransferable()` 自动切换                                                          | 楼层信息与合成连接器随图一起过 Worker                      |
+| 能力                  | 入口                                                                                 | 解决的问题                                                 |
+| --------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| 楼层元数据            | `levels`（建图选项）                                                                 | 分组有了楼层序号、标高和显示名                             |
+| 楼层感知的 A\* 下界   | 自动启用（`graph.heuristic.perLevel`）                                               | 竖向长途不再把起点层和中间层铺满，30 层实测展开数 883 → 30 |
+| 声明式竖向连接器      | `verticalConnectors`（建图选项）                                                     | 一次乘坐 = 一段，上下梯代价只计一次，不再逐层重复计        |
+| 点要素电梯（0.3.0）   | `pointConnector`（建图选项）                                                         | 数据里电梯是一个点（OSM `highway=elevator`），直接用       |
+| 按编号接楼层（0.3.0） | `nodeId`（建图选项）、站点 `nodeId`                                                  | 各层在同一个电梯节点处按编号接上，不依赖坐标完全一致       |
+| 按爬升计价            | `WeightContext` 的 `rise` / `fromGroup` / `toGroup`                                  | 楼梯可以按真实爬升定价，而不是按平面长度                   |
+| 结果里的楼层          | `section.level`、`leg.levels`、`leg.transitions`、`levelChanges`、`verticalDistance` | 看得出在哪儿换层、换了几层、爬升多少                       |
+| 按层渲染              | `toLevelFeatures(result)`（独立导出，不用就被摇掉）                                  | 室内地图一次只显示一层，这是直接输入                       |
+| 输出 z                | `output: { z: 'elevation' }`                                                         | 路径坐标带上标高，可直接喂三维视图                         |
+| 楼层诊断              | `diagnostics().connectorEnds / levelReachability / missingOrdinals`                  | 电梯没接上楼层、哪些层互相不可达、哪些层缺序号             |
+| 序列化 v2             | `toTransferable()` 自动切换                                                          | 楼层信息与合成连接器随图一起过 Worker                      |
 
 > 除此之外还修了一处旧行为：带 `connectors: 'legs'` 时，`sections[].start/end` 之前没有跟着前置连接段一起平移，指到的是错位的坐标；现在 `sections`、`transitions`、`levels` 与 `leg.path` 三者下标一致。详见 [升级指南](UPGRADING.md)。
 
@@ -139,6 +141,34 @@ verticalConnectors: [
 - 停靠点的坐标会像普通端点一样并入该层的顶点：与楼层顶点坐标一致就直接合并，否则会成为孤立点（`connectorEnds` 会报出来）。
 - `perLevelCost` 或 `direction` 用到了楼层序号，所以这两项要求对应分组在 `levels` 里有 `ordinal`，否则建图直接报错。
 - n 个停靠站产生 n(n−1)/2 条线段。30 层 × 4 部电梯约 1 700 条，室内规模没问题；超过约 60 站的井道再考虑别的建模。
+- 站点可以带 `nodeId`：先按编号接上该层网络里同编号的顶点，再退回坐标（见 §3.4）。
+
+### 3.4 点要素电梯与按编号接楼层（0.3.0）
+
+OSM 这类数据里电梯是一个**点**：`highway=elevator` 节点带 `level=0;1;2`，各层的步道都以这个节点为端点。`pointConnector` 直接把这样的点变成竖向连接器：
+
+```ts
+const finder = new LineFinder(osmIndoor, {
+  group: (p) => Number(p.level), // 线：每条步道属于一层
+  levels: (g) => (typeof g === 'number' ? { ordinal: g, elevation: g * 4 } : undefined),
+
+  // 点 → 竖向连接器；返回 null 的点照旧被跳过（门、闸机、兴趣点）
+  pointConnector: (p) =>
+    p.highway === 'elevator'
+      ? { groups: p.level.split(';').map(Number), boardCost: 30, perLevelCost: 3 }
+      : null,
+
+  // 线的每个坐标是一个 OSM 节点；点要素的编号就是电梯节点本身
+  nodeId: (p, { index }) => p.nodes?.[index] ?? p.node,
+});
+```
+
+- 代价语义与 `verticalConnectors` 完全相同（站间全连、`boardCost` 一次、`direction` 单向）——有测试断言两者建出的图除线段来源外逐字节相同。
+- 连接器**沿用点要素本身**：乘梯那一段的 `featureIndex` / `id` / `properties` 指回这个点，`graph.features` 不追加合成要素，`stats.pointConnectors` 是转换的点数，它们不再计入 `skippedFeatures`。
+- 站点接楼层的顺序：**编号优先**（配了 `nodeId` 时，点的编号在每一层各自对应一个顶点——编号按连通分组区分），其次坐标 / `tolerance`。所以即使步道端点离电梯点差了几十厘米（分别数字化的常见情况），只要编号一致就能接上；接没接上照旧用 `connectorEnds` 查，报告里的要素就是这个点。
+- `groups` 少于两个、点坐标非法、分组键不是字符串或数字时建图直接报错；`perLevelCost` 与 `direction` 同样需要 `levels` 里的 `ordinal`。
+
+`nodeId` 本身不限于多楼层：它是通用的"显式拓扑"选项，同编号即同一顶点，坐标与 `tolerance` 兜底，不同编号永不合并（立交）。详见 README"按节点编号连接"一节。
 
 ---
 
@@ -339,7 +369,7 @@ const graph = RoutingGraph.fromTransferable(data, { features: network.features }
 
 - **默认输出不变**：不配 `levels` 的路网与 0.1.0 / 0.2.0 逐位相同（金样本测试保证）。楼层字段只在开启时出现，`toLevelFeatures` 是独立导出，不用就被摇掉。
 - **引擎契约不动**：`SearchGraph` / `PathAlgorithm` 没有变化，楼层下界在库内构造、经 `heuristic` 注入，自定义引擎不需要改。
-- **体积**：核心路径 +4.1 KB gzip（consumer 27.8 → 31.8 KB，IIFE 29.7 → 34.0 KB）。
+- **体积**：楼层层在核心路径上约 +4.8 KB gzip（0.2.0 的 consumer 27 759 B → 多楼层 32 544 B）；0.3.0 整体见 CHANGELOG。
 - **不做的事**：三维距离引擎；时间相关代价（电梯候梯时段、扶梯按时段换向）；转向代价；从 IMDF 这类纯面数据生成路网骨架。
 
 ---

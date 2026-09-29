@@ -29,12 +29,13 @@
 ```
 NetworkCollection ──► topology.ts ─────────────────► build.ts ──────────────────────► RoutingGraph（只读、可共享、可序列化）
   (LineString /        │ 抽取线段（按要素/部分/坐标序） │ 权重 → forward/backward          │ 惰性：强连通分量、反向 CSR、节点-链索引、
-   MultiLineString)    │ VertexStore 按连通分组合并     │ 沿要素部分累计里程                │       顶点 / 节点 R 树
+   MultiLineString)    │ VertexStore 按分组合并（哈希） │ 沿要素部分累计里程                │       顶点 / 节点 R 树
                        │ 坐标范围与反经线守卫           │ chains.ts：度 2 顶点压缩成链      │ diagnostics() / toTransferable()
                        │ ConnectivityRepair（不跨组）   │ 有向 CSR、弱连通分量
                        │  · snapDangles                 │ A* 启发式数据（嵌入 + 最小代价比）
                        │  · splitIntersections          │ 线段 R 树（吸附用）
                        │ 修复日志（diagnostics: true）  │
+                       │ nodeId：编号优先、坐标兜底     │
 
 LineFinder.route(waypoints, options)
   ├─ options.ts     途经点解析（含 { coordinates, snap }）、选项校验与逐点合并
@@ -57,7 +58,7 @@ LineFinder.oneToMany / matrix ──► many.ts（一次多汇搜索得到一对
 | `src/geo/segment.ts`        | 点到线段投影、线段求交                                                                    |
 | `src/heap/`                 | `Heap` 接口 + 四叉堆（来自 terra-route，MIT）                                             |
 | `src/spatial/rtree.ts`      | 静态 Hilbert 打包 R 树（布局来自 flatbush，ISC），精确距离的最佳优先最近邻；可从数组重建  |
-| `src/graph/vertex-store.ts` | 按连通分组的顶点去重/合并                                                                 |
+| `src/graph/vertex-store.ts` | 按连通分组的顶点去重/合并：开放寻址哈希（精确坐标 / 容差网格）、节点编号                  |
 | `src/graph/topology.ts`     | 线段抽取、输入守卫、连通性修复（union-find 合并 + 按 t 排序的拆分请求）、修复日志         |
 | `src/graph/chains.ts`       | 度 2 压缩                                                                                 |
 | `src/graph/build.ts`        | 构建管线：权重、里程、链、CSR、分量、启发式数据、R 树                                     |
@@ -161,6 +162,11 @@ interface SearchResult {
 | 顶点合并     | `tolerance`（米 / 平面单位） | 网格单元 ≥ 容差，查 3×3 邻域并用真实距离判定；经度方向按路网最高纬度放大单元；只在同一分组内合并    | GPF 的舍入法对"骑在舍入边界两侧"的两点无能为力，哪怕相距 0.02 m（有测试） |
 | 悬挂端点修复 | `snapDangles`                | 度 1 顶点吸到阈值内最近线段（排除自身线段及其唯一邻点的线段，免得短支线折回自身），线段在投影处拆分 | 数字化时常见的"差一点没接上"的 T 字路口                                   |
 | 交叉打断     | `splitIntersections`         | R 树找候选对，X 交叉建新顶点、T 形接触用现成端点拆分；连接要素（两端分组不同）不参与                | 数据未在交叉处共点；立交与楼层用 `group` 分开                             |
+| 显式拓扑     | `nodeId`                     | 同分组内同编号即同一顶点；新编号先接管该位置**无编号**的顶点，再新建；不同编号永不合并              | 标准数据（OSM、OpenSidewalks、GTFS）用编号表达拓扑，立交靠"不共享节点"    |
+
+**顶点库的实现**：一张开放寻址哈希表，键（坐标或网格格子 + 分组）与占用位图平铺在类型化数组里。精确模式按坐标的位模式哈希（`+ 0` 把 `-0` 折成 `+0`，与原先 `Map` 键的 SameValueZero 一致）；容差模式按格子哈希，每个格子是一串顶点的链表头，查找看 3×3 邻域，不存在的格子只查位图、不碰大数组；候选按 (距离, 顶点号) 取最小，与链表顺序无关。"位置的主人是第一个落在这里的顶点"这条语义在两种模式、建图与反序列化之间保持一致。
+
+**编号优先、坐标兜底**的完整规则：有编号的坐标按 `(分组, 编号)` 找顶点，找到就用（哪怕坐标差得远，顶点位置保留首次出现的坐标，`diagnostics` 记一条带缝隙的 `merge`）；编号第一次出现时，先找该位置（精确或容差内）**没有编号**的顶点接管它，找不到才新建——一个顶点至多带一个编号，所以同一位置的两个不同编号必然是两个顶点。没有编号的坐标照旧按位置找任意顶点（带不带编号都行）。精确模式下"无编号的顶点若存在，必是该位置的主人"（它之后的坐标都会并进来），所以接管判断只需看主人。连接要素的中间坐标不调用 `nodeId`，保持"不与任何顶点合并"。编号只在建图期使用，`trim()` 时丢弃，不进入序列化。
 
 所有合并记在 union-find、所有拆分记成 `(t, vertex)` 请求，最后一次性应用——检测阶段始终基于原始线段编号，不会因边改边查而错位。缝隙为 0 的悬挂端点（端点恰好落在线段上）虽然 union 不变，但拆分建立了连接，同样计入 `danglesSnapped`。
 
@@ -240,13 +246,15 @@ interface SearchResult {
 
 ### 7.2 连通分组
 
-顶点身份是"分组 + 坐标"：`VertexStore` 为每个分组维护独立的精确 Map 或网格，合并与两种修复只在同组内进行。`group` 返回 `[起点组, 终点组]` 的连接要素，把每个部分的首坐标放入起点组、末坐标放入终点组；电梯这种零长度线因此成为两个不同顶点之间的线段。中间坐标（楼梯的踏步、折返平台）属于**无组**（`-1`）：不进 `VertexStore` 索引、不与任何顶点合并（只复用紧邻的重复坐标），两种修复与共线重叠诊断都跳过它们；落在两端不同组的线段内部的位置同样不属于任何组，任何 `group` 约束都不接受。这样楼梯不会与它跨过的楼层顶点合并，折返楼梯也不会在平面重合处短路。它的长度为 0，默认权重为 0 即不可通行，所以需要 `zeroWeight: 'free'` 或自定义固定权重。候选描述带分组，逐点 `snap.group` 与 `findVertex(x, y, group)` 可限定分组。
+顶点身份是"分组 + 坐标"（配了 `nodeId` 时是"分组 + 编号"优先）：`VertexStore` 的哈希键里带着分组，合并与两种修复只在同组内进行。`group` 返回 `[起点组, 终点组]` 的连接要素，把每个部分的首坐标放入起点组、末坐标放入终点组；电梯这种零长度线因此成为两个不同顶点之间的线段。中间坐标（楼梯的踏步、折返平台）属于**无组**（`-1`）：不进 `VertexStore` 索引、不与任何顶点合并（只复用紧邻的重复坐标），两种修复与共线重叠诊断都跳过它们；落在两端不同组的线段内部的位置同样不属于任何组，任何 `group` 约束都不接受。这样楼梯不会与它跨过的楼层顶点合并，折返楼梯也不会在平面重合处短路。它的长度为 0，默认权重为 0 即不可通行，所以需要 `zeroWeight: 'free'` 或自定义固定权重。候选描述带分组，逐点 `snap.group` 与 `findVertex(x, y, group)` 可限定分组。
 
 ### 7.2.1 楼层语义
 
 `group` 管"哪些顶点可以连在一起"，`levels` 管"这一组是第几层、多高"——两者刻意分开：立交、园区多建筑只需要前者。`levels` 解析为按组下标的 `ordinal` / `elevation` / `name` 三张表（`NaN` = 未知），连同惰性的 `nodeOrdinals()` 和逐顶点标高一起存在图上。逐顶点标高按组填，连接器内部的无组顶点**按长度在两端标高之间线性插值**，`WeightContext.rise`、`verticalDistance` 与 `output: { z: 'elevation' }` 都取自它。
 
 `verticalConnectors` 在建拓扑前展开为**合成线段**：每一对停靠站一条，代价 `boardCost + |Δordinal| × perLevelCost`，带预算代价直接注入段表、不经权重函数；停靠点像普通端点一样 `getOrAdd` 进所属组，因此合并、`tolerance`、`snapDangles` 照常把它接到楼层网络上。对应的合成要素追加在输入要素之后，`sections[].featureIndex` / `properties` 指向它们。
+
+`pointConnector` 走同一条展开路径（`expandConnector`）：对返回了 `{ groups, … }` 的 `Point` 要素，每个分组一个停靠站、位置都是该点，合成线段的来源要素就是这个点自己（不追加合成要素），排在网络自身的线段之后、`verticalConnectors` 之前。停靠站带着点的编号（`nodeId`）时按 `(分组, 编号)` 接到该层，否则按坐标。于是它与等价的 `verticalConnectors` 建出的图只差线段的来源要素（有测试逐字节比对），`perLevel` 推导、诊断、序列化都不需要区分两者。
 
 **楼层感知的下界**只改几何那一项，经 `SearchRequest.heuristic` 注入，引擎契约不动；ALT 取 `max(几何, 地标)`，自动叠加：
 
@@ -264,13 +272,13 @@ h(u) = scale · |e(u) − e(t)| + perLevel · dist(ord(u), 目标所在楼层区
 
 ### 7.4 序列化
 
-`toTransferable()` 把全部表、R 树数组、分组键与诊断日志拷贝进独立的 `ArrayBuffer`（`shared: true` 时为 `SharedArrayBuffer`），头部带格式名、版本与按名称的布局表；原图不受影响，缓冲区可以直接作为 `postMessage` 的转移列表。`fromTransferable()` 校验格式、版本与每个缓冲区的字节数，用类型化数组视图**零拷贝**恢复各表，按原顺序追加顶点重建 `VertexStore`（因此 id 与合并行为一致），用 `PackedRTree.fromData` 恢复 R 树。内置度量按名称与参考纬度重建，自定义度量必须由调用方传入同名对象；要素属性不序列化，需要 `sections.properties` 时传入原要素。地标表单独序列化。
+`toTransferable()` 把全部表、R 树数组、分组键与诊断日志拷贝进独立的 `ArrayBuffer`（`shared: true` 时为 `SharedArrayBuffer`），头部带格式名、版本与按名称的布局表；原图不受影响，缓冲区可以直接作为 `postMessage` 的转移列表。`fromTransferable()` 校验格式、版本与每个缓冲区的字节数，用类型化数组视图**零拷贝**恢复各表，直接在收到的坐标数组上按顶点顺序重建 `VertexStore` 的哈希索引（`VertexStore.fromArrays`，不拷贝坐标；因此 id、位置的主人与合并行为一致），用 `PackedRTree.fromData` 恢复 R 树。内置度量按名称与参考纬度重建，自定义度量必须由调用方传入同名对象；要素属性不序列化，需要 `sections.properties` 时传入原要素。地标表单独序列化。
 
 ## 8. 正确性保障与 GPF 次优问题的根因
 
 测试分几层（`pnpm test`）：
 
-1. **金样本**：`test/fixtures/golden-0.1.0.json` 由 0.1.0 生成，涵盖 GPF 路网、随机网格（含修复与不压缩）、合成仓库与大型 OSM 路网；默认配置下 0.1.0 已有的全部结果字段（含 `settled` / `relaxed`）必须逐位相同。
+1. **金样本**：`test/fixtures/golden-0.1.0.json` 由 0.1.0 生成，涵盖 GPF 路网、随机网格（含修复与不压缩）、合成仓库与大型 OSM 路网；默认配置下 0.1.0 已有的全部结果字段（含 `settled` / `relaxed`）必须逐位相同。**建图金样本**（0.3.0）`test/fixtures/graph-golden.json` 在建图优化前生成，按序列化后的每个缓冲区、惰性 R 树与诊断逐字节哈希，覆盖 24 种路网与配置（含容差、修复、多楼层与大路网）——顶点编号、段序、R 树打包与 CSR 顺序决定并列路径取哪条，路线级测试只有在两条路线恰好并列时才看得出，所以要在建图层锁住。
 2. **单元**：堆、R 树（对拍暴力）、度量（嵌入下界性质）、顶点合并、权重契约、强连通分量（对拍互相可达性）、地标表（对拍朴素全图搜索）。
 3. **差分**：随机网格（权重系数 0.5–2.5、单向、封路、抖动形状点）上，Dijkstra / A\* × 压缩 / 不压缩与一个**不共享任何代码**的朴素参考逐对比对代价，并逐边重算返回的路径；线段吸附场景把吸附点插回参考网络后再比对；全程择优（含穿越式）与暴力枚举对拍；ALT、双向 Dijkstra、一对多与内置引擎逐条一致。
 4. **对齐**：复刻 GPF 自带测试的全部断言；在 large-network.json 上与独立裁判逐对相等，并断言永不劣于 GPF。
@@ -288,7 +296,8 @@ if (!neighbor[otherNeighborKey] && weightFromNeighbor) { neighbor[otherNeighborK
 
 - 不支持跨 ±180° 经线的路网：0.2.0 起建图时直接报错。
 - `splitIntersections` 不处理共线重叠（`diagnostics().overlaps` 会列出）；三条线交于同一点且 `tolerance = 0` 时，浮点求出的交点可能不完全相同，建议配合一个很小的容差。
-- 顶点合并是"先到者为代表"，不做传递闭包（A≈B、B≈C 但 A≉C 时 C 不并入 A），因此要素顺序会影响拓扑；打开 `diagnostics` 可以看到每次合并。
+- 顶点合并是"先到者为代表"，不做传递闭包（A≈B、B≈C 但 A≉C 时 C 不并入 A），因此要素顺序会影响拓扑；打开 `diagnostics` 可以看到每次合并。配了 `nodeId` 时同一位置有多个不同编号的顶点，无编号的坐标并入其中第一个。
+- `splitIntersections` 的求交仍是逐线段查 R 树；改成单调链求交（JTS `MCIndexNoder` 思路）会改变候选遍历顺序、可能让并列路径换条，需要单独的金样本分析，暂未做。
 - 地标只布在最大弱连通分量里；其他分量上的查询结果不变，只是不加速。
 - 双向 Dijkstra 遇到多汇请求或 `maxCost` 时退回单向搜索。
 - 序列化保留坐标的前三维；自定义度量需要调用方在反序列化时提供。

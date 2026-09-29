@@ -12,7 +12,8 @@ A zero-dependency TypeScript library for shortest paths on GeoJSON line networks
 - **Switchable engines**: built-in A\* (optionally accelerated with ALT landmarks), Dijkstra and bidirectional Dijkstra, selectable per query by name, and you can register your own;
 - **Snapping**: waypoints need not be network vertices; each waypoint can have several candidates, hard constraints (`featureIds` / `filter` / `group`) say where it may attach, and the combination with the lowest snap cost + network cost can be chosen for the whole route; relocations are reported and can be capped;
 - **Many waypoints**: one call returns the route and its legs; unreachable waypoints can be skipped or bridged by straight legs; pass-through waypoints, per-leg connectors and one-to-many cost matrices are supported;
-- **Data quality and deployment**: routes carry measures along their features (linear referencing); a graph can locate dangling ends, near misses and repairs; floors and overpasses can be kept apart with groups; graphs serialise for Web Workers.
+- **Data quality and deployment**: routes carry measures along their features (linear referencing); a graph can locate dangling ends, near misses and repairs; floors and overpasses can be kept apart with groups; topology can follow the **node ids** in the data (OSM nodes, OpenSidewalks `_u_id` / `_v_id`), with coordinates and tolerance as the fallback; graphs serialise for Web Workers;
+- **Multiple levels**: storey numbers and heights, lifts / stairs / escalators (a lift can simply be a point feature), a level-aware A\* bound, per-level output.
 
 The routing core follows [terra-route](https://github.com/JamesLMilner/terra-route) (CSR adjacency, 4-ary heap, reusable scratch buffers); the weight configuration follows [geojson-path-finder](https://github.com/perliedman/geojson-path-finder). Works in browsers, Web Workers and Node.
 
@@ -27,7 +28,7 @@ pnpm add geoverse-line-finder
 Ships both ESM and CommonJS (Node ≥ 18; the type declarations need TypeScript ≥ 5.0). Without a bundler, load it with a `<script>` tag; the global is `GeoVerseLineFinder`:
 
 ```html
-<script src="https://unpkg.com/geoverse-line-finder@0.2.0"></script>
+<script src="https://unpkg.com/geoverse-line-finder@0.3.0"></script>
 <script>
   const finder = new GeoVerseLineFinder.LineFinder(roads);
 </script>
@@ -59,7 +60,7 @@ const tour = finder.route([start, via1, via2, end], { algorithm: 'dijkstra' });
 tour.ok && tour.legs.forEach((leg) => console.log(leg.from, '→', leg.to, leg.weight));
 ```
 
-Upgrading from 0.1.0: with default options the output is bit-identical to 0.1.0; the few behaviour changes are listed in [docs/UPGRADING.en.md](docs/UPGRADING.en.md).
+Upgrading from 0.1.0 / 0.2.0: with default options the output is bit-identical to 0.1.0; the few behaviour changes are listed in [docs/UPGRADING.en.md](docs/UPGRADING.en.md).
 
 ## Weights
 
@@ -129,13 +130,35 @@ The A\* heuristic is admissible for **any** weight (metric embedding × the netw
 | `splitIntersections` | `false`        | split lines where they cross or touch without a shared vertex (this also joins overpasses — keep them apart with `group`)                   |
 | `compact`            | `true`         | collapse degree-2 vertices into chains: identical results, faster search                                                                    |
 | `group`              | —              | connectivity groups (floors, overpass levels): merging, repairs and snapping never cross groups; connectors return `[startGroup, endGroup]` |
+| `nodeId`             | —              | the node id of a coordinate: the same id is the same vertex, with coordinates / `tolerance` as the fallback (see the next section)          |
 | `levels`             | —              | storey number / height / display name per group: switches on the level bound, `rise`, and the level fields of a result                      |
 | `verticalConnectors` | —              | lifts and stair shafts declared by their stops: one ride is one section, and boarding is charged once                                       |
+| `pointConnector`     | —              | turns `Point` features (an OSM `highway=elevator` tagged `level=0;1;2`) into vertical connectors                                            |
 | `zeroWeight`         | `'impassable'` | what a weight of `0` means; `'free'` makes zero-length connectors such as elevators free to pass                                            |
 | `diagnostics`        | `false`        | record repairs and invalid coordinates for `graph.diagnostics()`                                                                            |
 | `landmarks`          | —              | ALT landmarks (`LineFinder` only), see above                                                                                                |
 
 With a geographic metric, coordinates outside `[-180, 180] × [-90, 90]` (usually projected coordinates passed by mistake) and segments crossing the ±180° meridian now throw a `RangeError` at build time instead of silently producing wrong distances.
+
+## Connecting by node id (explicit topology)
+
+By default two lines connect only where their coordinates are **identical** (or within `tolerance`). When the data carries node ids — the nodes of OSM ways, the `_u_id` / `_v_id` of OpenSidewalks edges, the `from_stop_id` / `to_stop_id` of GTFS pathways — let `nodeId` decide the topology:
+
+```ts
+// OpenSidewalks: each edge names the nodes at its two ends
+const finder = new LineFinder(sidewalks, {
+  nodeId: (p, { index, last }) => (index === 0 ? p._u_id : last ? p._v_id : undefined),
+});
+
+// OSM: every coordinate of a way is a node
+const roads = new LineFinder(ways, { nodeId: (p, { index }) => p.nodes[index] });
+```
+
+- **Ids first**: coordinates with the same id in the same group are one vertex, even when their coordinates are metres apart (the vertex keeps the first position seen; with `diagnostics: true` such merges are logged as `merge` repairs with the gap).
+- **Coordinates as the fallback**: a coordinate for which the callback returns `null` / `undefined` merges by position (`tolerance`) as before, and an id seen for the first time takes over a vertex **without an id** at its position — so data with and without ids connects.
+- **Different ids never merge**: two ids at one position stay two vertices, which is exactly how OSM maps an overpass (the bridge and the road below share no node). With explicit topology you normally leave `splitIntersections` off: it would join the bridge to the road.
+- Ids are scoped by **connectivity group**: one lift node on two floors is a vertex on each floor. The interior coordinates of connector features are not passed to `nodeId` (they never merge with anything).
+- Without `nodeId` nothing changes; ids that agree with the coordinates build a graph **byte for byte identical** to the coordinates alone (locked by a test).
 
 ## Snapping
 
@@ -300,6 +323,20 @@ route.legs[0].transitions; // every passage: from/to level, signed change, indic
 toLevelFeatures(route); // a FeatureCollection split by level - the direct input for an indoor map
 ```
 
+Lifts are often a **point** in the data (OSM `highway=elevator` + `level=0;1;2`). `pointConnector` turns such a point into a vertical connector that works exactly like `verticalConnectors`, and the ride's `featureIndex` / `properties` point back at the point feature; together with `nodeId`, each floor attaches at the lift node by its id:
+
+```ts
+new LineFinder(osmIndoor, {
+  group: (p) => Number(p.level),
+  levels: (g) => (typeof g === 'number' ? { ordinal: g } : undefined),
+  nodeId: (p, { index }) => p.nodes?.[index] ?? p.node, // lines carry nodes, the point its node
+  pointConnector: (p) =>
+    p.highway === 'elevator'
+      ? { groups: p.level.split(';').map(Number), boardCost: 30, perLevelCost: 3 }
+      : null,
+});
+```
+
 Only the ends of a connector belong to floors (the first coordinate to the start group, the last to the end group). Its interior coordinates — the steps and landings of a staircase — **belong to no group**: they never merge with floor vertices, take no part in repairs, and a waypoint with a `group` constraint never snaps onto them. So attach both ends of a staircase to its floors: give them the coordinates of floor vertices, or let `tolerance` / `snapDangles` connect them within the floor — `graph.diagnostics().connectorEnds` tells you whether they landed.
 
 With `levels` set, a **level-aware A\* bound** switches on as well: on a 30-storey building one vertical trip settles 30 nodes instead of 883. Without `levels` nothing changes — no level fields, no bound, and output bit-identical to 0.1.0.
@@ -333,15 +370,15 @@ Landmark tables work the same way: `table.toTransferable()` / `LandmarkTable.fro
 
 ## Performance and correctness
 
-- All structures are flat typed arrays; queries reuse scratch buffers and only touch the nodes they visit.
-- Tests include golden outputs of 0.1.0 (default options stay bit-identical), randomized differential testing against a naive reference implementation, optimal selection against a brute force over every candidate combination, strongly connected components against mutual reachability, every assertion from geojson-path-finder's own suite, and pair-by-pair comparison with an independent referee on geojson-path-finder's 135k-coordinate one-way OSM network.
+- All structures are flat typed arrays; queries reuse scratch buffers and only touch the nodes they visit. The graph build deduplicates vertices in an open-addressing hash table, packs its R-tree with a radix sort and preallocates its typed arrays: on the 135k-coordinate OSM network, 0.3.0 builds graphs about 2× as fast as 0.2.0 (default options and the OSM travel-time weight; 1.3–1.5× with tolerance merging, 1.5–1.6× with topology repairs), with byte-identical output.
+- Tests include golden outputs of 0.1.0 (default options stay bit-identical), byte-for-byte golden graphs, randomized differential testing against a naive reference implementation, optimal selection against a brute force over every candidate combination, strongly connected components against mutual reachability, every assertion from geojson-path-finder's own suite, and pair-by-pair comparison with an independent referee on geojson-path-finder's 135k-coordinate one-way OSM network.
 - CI runs the full gate on Node 20 / 22 (including a bundle-size gate and a public API report), loads the built package on Node 18 / 20 / 22 including a worker round trip, and compiles a consumer against the declarations with TypeScript 5.0 / 5.4 / 5.7 / 5.9; pushing a `vX.Y.Z` tag publishes to npm — see [docs/RELEASE.en.md](docs/RELEASE.en.md).
 - Measurements and how to reproduce them: [docs/BENCHMARK.en.md](docs/BENCHMARK.en.md); design notes: [docs/ARCHITECTURE.en.md](docs/ARCHITECTURE.en.md); multi-level routing: [docs/MULTI_LEVEL.en.md](docs/MULTI_LEVEL.en.md).
 
 ```bash
 pnpm test             # unit + differential + brute force + golden outputs
 pnpm bench            # three-library benchmark (geojson-path-finder test data, ≥ 3 rounds)
-pnpm bench:features   # 0.2.0 features: regression against 0.1.0, ALT, bidirectional Dijkstra, optimal selection
+pnpm bench:features   # features: regression against 0.1.0, graph build, ALT, bidirectional Dijkstra, optimal selection, level bound
 pnpm check            # typecheck + lint + format + tests (coverage ratchet) + build + dist smoke test + size + API report
 pnpm check:types      # declarations compile with TypeScript 5.0 / 5.4 / 5.7 / 5.9
 ```

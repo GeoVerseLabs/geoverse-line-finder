@@ -12,7 +12,8 @@
 - **可切换引擎**：内置 A\*（可选 ALT 地标加速）、Dijkstra 与双向 Dijkstra，按名称逐次切换，也可注册自己的引擎；
 - **吸附**：起终点不必是路网顶点；每个途经点可给出多个候选，用 `featureIds` / `filter` / `group` 表达"哪里能接入"的硬约束，再按"吸附代价 + 路网代价"全程择优；吸附位置的迁移可见、可限；
 - **多途经点**：一次调用得到整条路线与分段结果；不可达的点可跳过或以直线兜底；支持穿越式途经点、逐段连接段与一对多代价矩阵；
-- **数据质量与部署**：路径带沿要素的里程（线性参照），建图可定位悬挂端点、近距离未接通与修复记录；楼层/立交可分组；图可序列化后放进 Worker。
+- **数据质量与部署**：路径带沿要素的里程（线性参照），建图可定位悬挂端点、近距离未接通与修复记录；楼层/立交可分组；可按数据里的**节点编号**连接（OSM 节点、OpenSidewalks `_u_id` / `_v_id`），坐标与容差兜底；图可序列化后放进 Worker；
+- **多楼层**：楼层序号与标高、电梯 / 楼梯 / 扶梯（可直接用点要素表示电梯）、楼层感知的 A\* 下界、按层输出。
 
 路径主体借鉴 [terra-route](https://github.com/JamesLMilner/terra-route)（CSR 邻接、四叉堆、scratch 复用），权重配置借鉴 [geojson-path-finder](https://github.com/perliedman/geojson-path-finder)。浏览器、Web Worker、Node 通用。
 
@@ -27,7 +28,7 @@ pnpm add geoverse-line-finder
 同时提供 ESM 与 CommonJS（Node ≥ 18，类型声明需要 TypeScript ≥ 5.0）。不经打包器时可直接用 `<script>` 引入，全局变量为 `GeoVerseLineFinder`：
 
 ```html
-<script src="https://unpkg.com/geoverse-line-finder@0.2.0"></script>
+<script src="https://unpkg.com/geoverse-line-finder@0.3.0"></script>
 <script>
   const finder = new GeoVerseLineFinder.LineFinder(roads);
 </script>
@@ -59,7 +60,7 @@ const tour = finder.route([start, via1, via2, end], { algorithm: 'dijkstra' });
 tour.ok && tour.legs.forEach((leg) => console.log(leg.from, '→', leg.to, leg.weight));
 ```
 
-从 0.1.0 升级：默认配置下的输出与 0.1.0 逐位相同，个别行为变化见 [docs/UPGRADING.md](docs/UPGRADING.md)。
+从 0.1.0 / 0.2.0 升级：默认配置下的输出与 0.1.0 逐位相同，个别行为变化见 [docs/UPGRADING.md](docs/UPGRADING.md)。
 
 ## 权重
 
@@ -128,13 +129,35 @@ A\* 的启发式对**任意**权重都可采纳（度量嵌入 × 全网最小"�
 | `splitIntersections` | `false`        | 在未共点的交叉/接触处打断（会把立交也接上：用 `group` 分开）                                        |
 | `compact`            | `true`         | 度 2 顶点压缩成链，结果不变、搜索更快                                                               |
 | `group`              | —              | 连通分组（楼层、立交层）：合并、修复与吸附都不跨组，连接要素返回 `[起点组, 终点组]`（见多楼层一节） |
+| `nodeId`             | —              | 坐标的节点编号：同编号即同一顶点，坐标 / `tolerance` 兜底（见下一节）                               |
 | `levels`             | —              | 每个分组的楼层序号 / 标高 / 显示名：开启楼层下界、`rise` 与结果里的楼层字段                         |
 | `verticalConnectors` | —              | 按停靠站声明的电梯 / 楼梯井：一次乘坐 = 一段，候梯代价只计一次                                      |
+| `pointConnector`     | —              | 把 `Point` 要素（如 OSM `highway=elevator` + `level=0;1;2`）变成竖向连接器                          |
 | `zeroWeight`         | `'impassable'` | 权重 `0` 的含义；`'free'` 让电梯这类零长度连接边零代价可通行                                        |
 | `diagnostics`        | `false`        | 记录修复与非法坐标，供 `graph.diagnostics()` 定位                                                   |
 | `landmarks`          | —              | ALT 地标（`LineFinder` 专有），见上节                                                               |
 
 地理度量下，坐标超出 `[-180, 180] × [-90, 90]`（多半是误传了投影坐标）或线段跨越 ±180° 经线时，建图直接抛 `RangeError`，不再静默算出错误距离。
+
+## 按节点编号连接（显式拓扑）
+
+默认只凭**坐标相同**（或 `tolerance` 内）判断两条线是否相连。数据本身带节点编号时——OSM 路径的节点、OpenSidewalks 边的 `_u_id` / `_v_id`、GTFS pathways 的 `from_stop_id` / `to_stop_id`——用 `nodeId` 让编号决定拓扑：
+
+```ts
+// OpenSidewalks：边的两端各有一个节点编号
+const finder = new LineFinder(sidewalks, {
+  nodeId: (p, { index, last }) => (index === 0 ? p._u_id : last ? p._v_id : undefined),
+});
+
+// OSM：路径的每个坐标都有节点编号
+const roads = new LineFinder(ways, { nodeId: (p, { index }) => p.nodes[index] });
+```
+
+- **编号优先**：同一分组内同编号的坐标就是同一个顶点，哪怕坐标差了几米（顶点位置取首次出现的坐标；`diagnostics: true` 时这类合并以 `merge` 记录并给出缝隙）。
+- **坐标兜底**：回调返回 `null` / `undefined` 的坐标照旧按位置（`tolerance`）合并；新出现的编号会先接管同一位置上**没有编号**的顶点，所以带编号与不带编号的数据能互相接上。
+- **不同编号不合并**：同一位置的两个不同编号保持为两个顶点——OSM 立交正是这样表达的（桥与桥下道路不共享节点）。所以有显式拓扑时一般不要开 `splitIntersections`，它会把桥接到桥下。
+- 编号按**连通分组**区分：同一个电梯节点出现在两层，就是两层各一个顶点。连接要素的中间坐标不调用 `nodeId`（它们本来就不与任何顶点合并）。
+- 不配 `nodeId` 时一切照旧；给出的编号与坐标一致时，建出的图与只用坐标时**逐字节相同**（有测试锁定）。
 
 ## 吸附
 
@@ -299,6 +322,20 @@ route.legs[0].transitions; // 每一次换层：起止楼层、有符号层数�
 toLevelFeatures(route); // 按层拆好的 FeatureCollection，室内地图按层渲染的直接输入
 ```
 
+电梯在数据里常常是一个**点**（OSM `highway=elevator` + `level=0;1;2`）。用 `pointConnector` 直接把它变成竖向连接器，效果与 `verticalConnectors` 相同，路线里这一段的 `featureIndex` / `properties` 指回这个点要素；配合 `nodeId`，各层在电梯节点处按编号接上：
+
+```ts
+new LineFinder(osmIndoor, {
+  group: (p) => Number(p.level),
+  levels: (g) => (typeof g === 'number' ? { ordinal: g } : undefined),
+  nodeId: (p, { index }) => p.nodes?.[index] ?? p.node, // 线用 nodes，点用 node
+  pointConnector: (p) =>
+    p.highway === 'elevator'
+      ? { groups: p.level.split(';').map(Number), boardCost: 30, perLevelCost: 3 }
+      : null,
+});
+```
+
 连接要素只有首尾坐标属于楼层（首坐标进起点组、末坐标进终点组）；中间坐标（楼梯的踏步、折返平台）**不属于任何组**：不与楼层上的顶点合并、不参与修复，也不会被带 `group` 约束的途经点吸附上去。所以楼梯要在首尾两端接上楼层——端点与楼层顶点坐标一致，或靠 `tolerance` / `snapDangles` 在同层内接上；接没接上用 `graph.diagnostics().connectorEnds` 查。
 
 配了 `levels` 还会自动启用**楼层感知的 A\* 下界**：30 层楼里一趟竖向行程的展开节点数实测从 883 降到 30。不配 `levels` 则一切照旧——楼层字段不出现，下界不启用，输出与 0.1.0 逐位相同。
@@ -332,15 +369,15 @@ const finder = new LineFinder(graph);
 
 ## 性能与正确性
 
-- 全部结构为扁平 TypedArray；查询复用 scratch 缓冲，只触碰访问到的节点。
-- 测试含：0.1.0 输出的金样本（默认配置逐位相同）、与朴素参考实现的随机差分、全程择优与"枚举全部候选组合"的暴力对拍、强连通分量与可达性的对拍、GPF 自带测试的全部断言，以及在 GPF 的 13.5 万坐标 OSM 单向路网上与独立裁判逐对比对。
+- 全部结构为扁平 TypedArray；查询复用 scratch 缓冲，只触碰访问到的节点。建图用开放寻址哈希去重顶点、基数排序打包 R 树、预分配类型化数组：13.5 万坐标的 OSM 路网上，0.3.0 建图比 0.2.0 快约 2 倍（默认配置与 OSM 通行时间权重；容差合并 1.3～1.5 倍、拓扑修复 1.5～1.6 倍），产物逐字节不变。
+- 测试含：0.1.0 输出的金样本（默认配置逐位相同）、建图产物的逐字节金样本、与朴素参考实现的随机差分、全程择优与"枚举全部候选组合"的暴力对拍、强连通分量与可达性的对拍、GPF 自带测试的全部断言，以及在 GPF 的 13.5 万坐标 OSM 单向路网上与独立裁判逐对比对。
 - CI 在 Node 20 / 22 上跑全部门禁（含体积门禁与公开 API 报告），在 Node 18 / 20 / 22 上直接加载构建产物并做 Worker 往返，并用 TypeScript 5.0 / 5.4 / 5.7 / 5.9 编译使用方代码；推送 `vX.Y.Z` tag 自动发布，见 [docs/RELEASE.md](docs/RELEASE.md)。
 - 实测数据与复现方法见 [docs/BENCHMARK.md](docs/BENCHMARK.md)；设计说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；多楼层专题见 [docs/MULTI_LEVEL.md](docs/MULTI_LEVEL.md)。
 
 ```bash
 pnpm test             # 单元 + 差分 + 对拍 + 金样本
 pnpm bench            # 三库基准（geojson-path-finder 测试数据，≥3 轮）
-pnpm bench:features   # 0.2.0 功能基准：对 0.1.0 回归、ALT、双向 Dijkstra、全程择优
+pnpm bench:features   # 功能基准：对 0.1.0 回归、建图、ALT、双向 Dijkstra、全程择优、楼层下界
 pnpm check            # 类型检查 + lint + 格式 + 测试（覆盖率棘轮）+ 构建 + 产物冒烟 + 体积 + API 报告
 pnpm check:types      # 声明文件在 TypeScript 5.0 / 5.4 / 5.7 / 5.9 下编译
 ```

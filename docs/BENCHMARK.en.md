@@ -84,7 +84,7 @@ The same 60 random pairs (OSM time weight), compared with a naive referee that s
 
 Conclusion: when geojson-path-finder compacts degree-2 vertices, `if (!neighbor[otherNeighborKey] && weightFromNeighbor)` adds a bypass only if the two neighbours have **no** edge yet; if a more expensive one exists (a parallel road, the opposite carriageway, or a longer chain compacted earlier), the cheaper bypass is dropped and the shortest path disappears from the compacted graph. Re-pricing its returned path with the referee gives exactly the weight it reports — the path is valid, just not the shortest. Versions 2.0.2 and 2.1.0 share this line.
 
-## 5. 0.2.0 feature benchmarks (`pnpm bench:features`)
+## 5. Feature benchmarks (`pnpm bench:features`)
 
 > 2026-09-14, same machine and method as above; the 0.1.0 baseline is the package published on npm (devDependency alias `glf-baseline`). The comparison with 0.1.0 uses the **built** package (`dist/`), so run `pnpm build` first; running the sources under tsx makes graph builds look about 20 % slower.
 
@@ -177,6 +177,28 @@ Timings (the 29 trips together):
 - Only the comparison with Dijkstra has non-overlapping timing ranges (2.0–3.4 vs 3.9–5.4 ms). Against plan-only A\* the ranges overlap, which at this scale (about 100 µs per search) is noise. The searches are too quick for wall-clock to show much; the gap would appear on larger buildings or in batch queries such as one-to-many and matrices.
 - **The last row is the limit**: when the target is also far away in plan there is almost nothing to gain. The cause is the plan term — on a Manhattan grid the straight-line bound falls about √2 short of the real walking distance, and that slack keeps most nodes looking like they are on a shortest path; ALT helps by about 1 %. This is A\*'s standing difficulty with grid networks, not something the level layer introduces.
 - A free lift or a group without an `ordinal` degenerates `perLevel` to 0, which is then exactly the plan-only case (see [MULTI_LEVEL.en.md](MULTI_LEVEL.en.md) §7.3).
+
+### 5.7 Graph build (0.3.0, `--only build`)
+
+> 2026-09-29, Intel Core Ultra 9 185H, Node 22.12.0, `--expose-gc`. Graph construction only (`buildGraph`), built artefacts on both sides; each sample runs a GC and then **5 consecutive builds, averaged** (much steadier than single builds), and the order alternates per sample. The comparison with 0.2.0 points `--against` at the `dist/index.js` of the unpacked npm package:
+>
+> `npm pack geoverse-line-finder@0.2.0 && tar -xzf geoverse-line-finder-0.2.0.tgz && pnpm bench:features --only build --against package/dist/index.js`
+
+The 135k-coordinate OSM network (large-network.json, line features), 7 samples:
+
+| network · options                                  | 0.2.0 ms            | 0.3.0 ms            | ratio (medians) |
+| -------------------------------------------------- | ------------------- | ------------------- | --------------- |
+| distance (default)                                 | 227.3 [202.5–237.3] | 110.7 [94.0–124.6]  | **2.05×**       |
+| OSM travel-time weight                             | 207.9 [204.5–213.3] | 104.7 [101.0–119.6] | **1.99×**       |
+| `tolerance: 1.1`                                   | 245.7 [241.3–261.3] | 169.7 [151.3–190.5] | 1.45×           |
+| `snapDangles: 1` + `splitIntersections`            | 456.1 [442.3–476.2] | 288.5 [276.2–298.5] | 1.58×           |
+| `nodeId` (an integer id per coordinate; not 0.2.0) | —                   | 135.9 [131.0–142.4] | —               |
+| 30-storey tower · `levels` + `splitIntersections`  | —                   | 8.6 [5.6–10.5]      | —               |
+
+- None of the four comparisons overlaps. A second 5-sample run gave 2.16 / 2.07 / 1.30 / 1.50× — absolute times drift with the machine's state, the ratios stay at "about 2× by default, 1.3–1.5× with tolerance, 1.5–1.6× with repairs". Against 0.1.0 (the default `--against`) the same method gives 1.98 / 1.88 / 1.28 / 1.37×.
+- The gain has three sources, none of which changes the output (`test/graph-golden.test.ts` pins the built graph byte for byte): vertex deduplication moved from nested `Map`s to an open-addressing hash table laid out in typed arrays; the R-tree's Hilbert sort moved from a comparison sort with a closure comparator to a stable radix sort; topology and chain compaction preallocate typed arrays, skip the repair stage when no repair is asked for, and the default length weight no longer builds a `WeightContext` per segment. In the profile before the change these took over half of the build (vertex deduplication about 24 %, GC about 16 %, R-tree packing about 11 %).
+- Tolerance mode gains less: every lookup inspects the 3×3 = 9 cells around it, most of which do not exist; a small bitmap now spares the memory accesses for the empty ones, and what is left is mostly the real distance comparisons. What remains in repair mode is mostly `splitIntersections`' own intersection tests — switching them to monotone chains (item A4 of the research) would change the order in which candidates are visited and could swap one of several equal routes for another, so it is not done.
+- With an id on every coordinate, `nodeId` builds about 1.2× slower than coordinates alone (one callback and one `Map` lookup per coordinate) — the inherent cost of explicit topology; ids on end points only cost less.
 
 ## Reproducing
 

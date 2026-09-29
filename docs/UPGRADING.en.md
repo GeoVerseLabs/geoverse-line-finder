@@ -2,9 +2,9 @@
 
 🌐 [简体中文](UPGRADING.md) ｜ English
 
-## From 0.2.0 to the next release (multi-level)
+## From 0.2.0 to 0.3.0 (multiple levels, node ids, faster builds)
 
-Networks that do not use `group` are unaffected: with default options the output is still bit-identical to 0.1.0. The changes below only concern connectivity groups, snap constraints and `connectors: 'legs'`.
+Networks that do not use `group` are unaffected: with default options the output is still bit-identical to 0.1.0 and the built graph byte-identical to 0.2.0 — it is only built faster (about 2× with default options). The changes below only concern connectivity groups, snap constraints, `connectors: 'legs'` and the new options.
 
 | Change                                                                         | Who is affected                                                      | What to do                                                                                                                                                                |
 | ------------------------------------------------------------------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -16,13 +16,18 @@ Networks that do not use `group` are unaffected: with default options the output
 | `GRAPH_FORMAT_VERSION` changed from `1` to `2`                                 | Code asserting `data.formatVersion === GRAPH_FORMAT_VERSION`         | Graphs without level semantics still write `1`; to test readability use the new `GRAPH_FORMAT_VERSIONS.includes(v)`                                                       |
 | `WeightContext` gains `fromGroup` / `toGroup` / `rise`                         | Tests that build a `WeightContext` literal by hand                   | Add the three fields; weight functions themselves are unaffected                                                                                                          |
 | `graph.features` grows when `verticalConnectors` is used                       | Code mapping `featureIndex` back to the input collection             | The synthesised features are appended after the input; `stats.verticalConnectors` counts them, and deserialising with the input features brings them back from the header |
+| Stop positions of `verticalConnectors` are validated                           | Code passing invalid positions (`NaN`, missing dimensions)           | They used to create a NaN vertex and quietly break routes; now they throw a `TypeError` — fix the data                                                                    |
+| `stats` gains `pointConnectors` / `nodeIds`                                    | Tests snapshotting or deep-comparing `stats`                         | Update the snapshot; both are 0 unless `pointConnector` / `nodeId` is used                                                                                                |
+| With `pointConnector`, points turned into connectors leave `skippedFeatures`   | Data checks built on `skippedFeatures`                               | Those points are now part of the graph; `stats.pointConnectors` counts them                                                                                               |
 
 **To switch multi-level on** (none of it is required — without `levels` everything stays as it was):
 
 1. add `levels` with an `ordinal` (and optionally an `elevation`) for every floor group;
 2. make sure there is **no free way to change level** — give zero-length lifts a fixed positive cost, or the level bound degenerates to 0;
 3. run `graph.diagnostics()` once and read `connectorEnds` and `missingOrdinals`;
-4. declare lifts through `verticalConnectors` so the boarding cost is not charged per floor.
+4. declare lifts through `verticalConnectors` so the boarding cost is not charged per floor; when the data maps a lift as a point (OSM `highway=elevator`), use `pointConnector`.
+
+**When the data carries node ids** (OSM nodes, OpenSidewalks `_u_id` / `_v_id`, GTFS stop ids): add `nodeId` so that the ids decide the topology, with coordinates and `tolerance` as the fallback; you then normally leave `splitIntersections` off (it would join overpasses). See "Connecting by node id" in the README.
 
 See [Multi-level routing](MULTI_LEVEL.en.md).
 

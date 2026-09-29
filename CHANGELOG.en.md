@@ -4,9 +4,32 @@
 
 This project follows [Semantic Versioning](https://semver.org/); while in 0.x, minor versions may contain breaking changes.
 
-## Unreleased
+## 0.3.0 — Unreleased
 
-With default options (no `group` / `levels`) the output is still bit-identical to 0.1.0 (golden tests unchanged). The changes below only affect connectivity groups, level semantics and snap constraints.
+With default options (no `group` / `levels` / `nodeId` / `pointConnector`) the output is still bit-identical to 0.1.0 (golden tests unchanged), and the built graph — vertex numbering, segment order, chains, CSR, R-tree, diagnostics — is byte-for-byte what it was before the changes (new golden graphs in `test/graph-golden.test.ts`, 24 networks and configurations). The changes below only affect connectivity groups, level semantics, snap constraints and the new options.
+
+### Performance: faster graph builds
+
+On the 135k-coordinate OSM network, graph builds relative to 0.2.0: **2.05×** as fast with default options, 1.99× with the OSM travel-time weight, 1.45× with `tolerance: 1.1`, 1.58× with `snapDangles + splitIntersections` (7 samples, each the mean of 5 consecutive builds, built artefacts on both sides, no overlapping ranges; a second 5-sample run gave 2.16 / 2.07 / 1.30 / 1.50×; `pnpm bench:features --only build --against <0.2.0's dist/index.js>`, see [docs/BENCHMARK.en.md](docs/BENCHMARK.en.md) §5.7). The output is unchanged.
+
+- **Vertex deduplication**: the nested `Map`s are replaced by an open-addressing hash table whose keys and occupancy bitmap live in flat typed arrays; exact mode hashes the coordinates' bit patterns (`-0` and `+0` are the same coordinate, as before), tolerance mode hashes grid cells, and the cells of the 3×3 neighbourhood that do not exist cost one lookup in a small bitmap.
+- **R-tree packing**: sorting by Hilbert value is now a stable 8-bit radix sort instead of a comparison sort calling a closure per comparison; the order is exactly that of sorting by (Hilbert value, index).
+- **Preallocation**: topology and chain compaction preallocate typed arrays from known bounds instead of `push` followed by `Int32Array.from`; the whole repair stage is skipped when no repair is requested; the graph shares the vertex store's trimmed coordinate arrays; the default length weight no longer builds a `WeightContext` per segment.
+- Deserialising (`RoutingGraph.fromTransferable`) likewise builds the hash table directly over the received buffers instead of inserting every vertex into nested `Map`s.
+
+### Added: connecting by node id (explicit topology)
+
+- **`nodeId` build option**: `(properties, { featureIndex, feature, part, index, last, position }) => id | null | undefined`. Coordinates with the same id in the same group are one vertex, however far apart they are (the vertex keeps the first position seen); coordinates returning `null` / `undefined` merge by position and `tolerance` as before. An id seen for the first time takes over a vertex **without an id** at its position, so data with and without ids connects; **different ids never merge**, so an OSM overpass (the bridge and the road below share no node) is not joined by coincident coordinates. Ids are scoped by connectivity group; the interior coordinates of connector features are not passed to `nodeId`.
+- With `diagnostics: true`, an id merge that bridges a gap is reported as a `merge` repair with the gap's width — a quick way to find id clashes or coordinate drift.
+- Ids that agree with the coordinates build a graph byte for byte identical to the coordinates alone (differential tests on the GPF network, random grids with repairs, multi-level buildings and the 135k-coordinate OSM network, each with every coordinate keyed and with a random half of the features keyed).
+- `stats.nodeIds`: vertices carrying an id.
+
+### Added: point features as vertical connectors
+
+- **`pointConnector` build option**: `(properties, featureIndex, feature) => { groups, boardCost?, perLevelCost?, direction? } | null` expands a `Point` feature (an OSM `highway=elevator` tagged `level=0;1;2`) into an all-stops-connected vertical connector with exactly the cost semantics of `verticalConnectors` (a test asserts both build byte-identical graphs apart from the segments' source feature). The connector keeps the point's index and properties: the ride's `featureIndex` / `id` / `properties` point back at the point, and nothing is appended to `graph.features`.
+- Its stops attach to each floor by the point's node id (`nodeId`) first, then by position / `tolerance`; `graph.diagnostics().connectorEnds` reports stops that did not land (naming the point).
+- The stops of `verticalConnectors` accept a `nodeId` as well.
+- `stats.pointConnectors`: points turned into connectors; they no longer count in `stats.skippedFeatures`.
 
 ### Added: multi-level routing
 
@@ -42,7 +65,9 @@ The full story is in [docs/MULTI_LEVEL.en.md](docs/MULTI_LEVEL.en.md). The engin
 - Topology diagnostics: connectors are no longer reported as collinear overlaps (stairs stacked floor above floor are drawn that way); near misses of dead ends only consider segments lying entirely in their group, matching the `snapDangles` repair.
 - `stats` gains `verticalConnectors` (the number of synthesised features); with `verticalConnectors` set, `stats.features` and `graph.features.length` include them.
 - `GRAPH_FORMAT_VERSION` changed from 1 to 2 (the newest format this build writes); `GRAPH_FORMAT_VERSIONS` lists every format it reads. Graphs without level semantics still write 1.
-- **Size gate raised**: consumer 29 000 → 33 500 B, IIFE 30 500 → 36 000 B. Measured 27.8 → 31.8 KB / 29.7 → 34.0 KB gzip; the extra 4.1 KB is this release's level layer (per-group indexes +0.7 KB, level semantics +3.4 KB). The result converter `toLevelFeatures` is a separate export and does not count unless used.
+- The stop positions of `verticalConnectors` are now validated: an invalid position throws a `TypeError` (it used to create a NaN vertex).
+- Graphs serialised by 0.2.0 get the new counters (`verticalConnectors` / `pointConnectors` / `nodeIds`) filled in as 0 when deserialised.
+- **Size gate raised**: consumer 29 000 → 35 500 B, IIFE 30 500 → 38 000 B. Measured 0.2.0 → 0.3.0: consumer 27 759 → 34 581 B, IIFE 29 663 → 36 906 B gzip — about +4.8 KB for the level layer (per-group indexes, level semantics), +1.7 KB for the faster build (hash-table vertex store, radix sort, preallocation) and +0.3 KB for node ids and point connectors. All of it sits on the `buildGraph` / `LineFinder` path and cannot be tree-shaken; the result converter `toLevelFeatures` is a separate export and does not count unless used.
 
 ## 0.2.0 — 2026-09-14
 
