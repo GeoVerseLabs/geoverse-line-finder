@@ -5,6 +5,8 @@ import { osmWeight, type OsmProps } from '../bench/osm-weight';
 import {
   buildGraph,
   createPropertyWeight,
+  graphFromBinary,
+  graphToBinary,
   type GraphOptions,
   type GraphStats,
   type NetworkCollection,
@@ -194,7 +196,11 @@ add('large-network-tolerance', large, { tolerance: 1.1 }, !LARGE);
 describe('golden graphs (building stays bit-identical)', () => {
   for (const c of cases) {
     it.skipIf(!!c.skip)(c.id, () => {
-      const digest = digestGraph(c.build());
+      const graph = c.build();
+      const digest = digestGraph(graph);
+      // The binary file must reproduce every table, lazy index and diagnostic of the graph it was written from.
+      const file = graphToBinary(graph, { features: true });
+      expect(digestGraph(graphFromBinary(file).graph), 'binary round trip').toEqual(digest);
       if (UPDATE) {
         golden[c.id] = digest;
         return;

@@ -386,11 +386,11 @@ export function searchCandidates(
   const Y = graph.vertices.y;
 
   const vertexHit = (vertex: number): Hit => {
-    const { node, chain, chainPos, positions } = graph.vertices;
+    const { node, chain, chainPos } = graph.vertices;
     if (node[vertex] >= 0) {
       return {
         anchor: { kind: 'node', node: node[vertex] },
-        point: positions[vertex],
+        point: graph.position(vertex),
         featureIndex: -1,
         chain: -1,
         position: 0,
@@ -401,7 +401,7 @@ export function searchCandidates(
     const slot = graph.chains.segStart[c] + chainPos[vertex];
     return {
       anchor: { kind: 'chain', chain: c, position: chainPos[vertex] },
-      point: positions[vertex],
+      point: graph.position(vertex),
       featureIndex: graph.segments.feature[slot],
       chain: c,
       position: chainPos[vertex],
@@ -477,7 +477,6 @@ export function searchCandidates(
         const tree = sub ? sub.tree : graph.nodeSpatialIndex();
         const items = sub ? sub.items : null;
         const nodeVertex = graph.nodes.vertex;
-        const positions = graph.vertices.positions;
         tree.nearest(
           x,
           y,
@@ -491,7 +490,7 @@ export function searchCandidates(
             const n = items ? items[i] : i;
             return visit({
               anchor: { kind: 'node', node: n },
-              point: positions[nodeVertex[n]],
+              point: graph.position(nodeVertex[n]),
               featureIndex: -1,
               chain: -1,
               position: 0,

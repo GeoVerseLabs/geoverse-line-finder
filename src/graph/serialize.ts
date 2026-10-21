@@ -14,7 +14,7 @@ export const GRAPH_FORMAT_VERSION = 2;
 export const GRAPH_FORMAT_VERSIONS: readonly number[] = [1, 2];
 
 type ArrayKind = 'f64' | 'i32' | 'u32' | 'u8';
-type Typed = Float64Array | Int32Array | Uint32Array | Uint8Array;
+export type Typed = Float64Array | Int32Array | Uint32Array | Uint8Array;
 
 /** Plain, structured-clone friendly form of a {@link RoutingGraph}. */
 export interface TransferableGraph {
@@ -55,22 +55,31 @@ export interface DeserializeOptions<P> {
 
 const CTOR = { f64: Float64Array, i32: Int32Array, u32: Uint32Array, u8: Uint8Array } as const;
 
-function kindOf(array: Typed): ArrayKind {
+export function kindOf(array: Typed): ArrayKind {
   if (array instanceof Float64Array) return 'f64';
   if (array instanceof Int32Array) return 'i32';
   if (array instanceof Uint32Array) return 'u32';
   return 'u8';
 }
 
-/** Serialises every table, index and log of a graph into standalone buffers (the graph itself is untouched). */
-export function graphToTransferable(
-  graph: RoutingGraph<unknown>,
-  options: SerializeOptions = {},
-): TransferableGraph {
+/** Every table of a graph as named arrays (views of the graph's own arrays where possible), plus the header. */
+export function graphParts(graph: RoutingGraph<unknown>): {
+  formatVersion: number;
+  header: GraphHeader;
+  parts: [string, Typed][];
+} {
   const { vertices, nodes, chains, segments, edges, components } = graph;
   const V = vertices.count;
   const positions = new Float64Array(V * 3);
+  const z = graph.positionZ;
   for (let v = 0; v < V; v++) {
+    if (z !== undefined) {
+      // Positions made from the typed arrays: write them without creating one array per vertex.
+      positions[3 * v] = vertices.x[v];
+      positions[3 * v + 1] = vertices.y[v];
+      positions[3 * v + 2] = z ? z[v] : NaN;
+      continue;
+    }
     const p = vertices.positions[v];
     positions[3 * v] = p[0];
     positions[3 * v + 1] = p[1];
@@ -129,17 +138,7 @@ export function graphToTransferable(
     parts.push(['diagnostics.repairs', table], ['diagnostics.invalid', log.invalid]);
   }
 
-  const shared = options.shared === true && typeof SharedArrayBuffer !== 'undefined';
-  const layout: GraphHeader['layout'] = [];
-  const buffers: ArrayBufferLike[] = [];
-  for (const [name, array] of parts) {
-    const buffer = shared ? new SharedArrayBuffer(array.byteLength) : new ArrayBuffer(array.byteLength);
-    new Uint8Array(buffer).set(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
-    layout.push([name, kindOf(array), array.length]);
-    buffers.push(buffer);
-  }
   return {
-    format: GRAPH_FORMAT,
     // Level metadata needs version 2; without it the bytes are exactly what 0.2.0 wrote.
     formatVersion: levels ? 2 : 1,
     header: {
@@ -161,10 +160,38 @@ export function graphToTransferable(
         : null,
       largestComponent: components.largest,
       rtree: { numItems: graph.segmentIndex.numItems, nodeSize: graph.segmentIndex.nodeSize },
-      layout,
+      layout: parts.map(([name, array]) => [name, kindOf(array), array.length]),
     },
-    buffers,
+    parts,
   };
+}
+
+/** Serialises every table, index and log of a graph into standalone buffers (the graph itself is untouched). */
+export function graphToTransferable(
+  graph: RoutingGraph<unknown>,
+  options: SerializeOptions = {},
+): TransferableGraph {
+  const { formatVersion, header, parts } = graphParts(graph);
+  const shared = options.shared === true && typeof SharedArrayBuffer !== 'undefined';
+  const buffers = parts.map(([, array]) => {
+    const buffer = shared ? new SharedArrayBuffer(array.byteLength) : new ArrayBuffer(array.byteLength);
+    new Uint8Array(buffer).set(new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
+    return buffer;
+  });
+  return { format: GRAPH_FORMAT, formatVersion, header, buffers };
+}
+
+/** Throws unless `data` names the graph format in a version this build reads. */
+export function checkGraphFormat(
+  data: { format?: unknown; formatVersion?: unknown } | null | undefined,
+): void {
+  if (!data || data.format !== GRAPH_FORMAT)
+    throw new TypeError('Not a serialised geoverse-line-finder graph.');
+  if (!GRAPH_FORMAT_VERSIONS.includes(data.formatVersion as number)) {
+    throw new RangeError(
+      `Unsupported graph format version ${String(data.formatVersion)}; this build reads versions ${GRAPH_FORMAT_VERSIONS.join(', ')}.`,
+    );
+  }
 }
 
 /** Rebuilds a graph from {@link graphToTransferable} output, viewing the buffers without copying them. */
@@ -172,24 +199,36 @@ export function graphFromTransferable<P = unknown>(
   data: TransferableGraph,
   options: DeserializeOptions<P> = {},
 ): RoutingGraph<P> {
-  if (!data || data.format !== GRAPH_FORMAT)
-    throw new TypeError('Not a serialised geoverse-line-finder graph.');
-  if (!GRAPH_FORMAT_VERSIONS.includes(data.formatVersion)) {
-    throw new RangeError(
-      `Unsupported graph format version ${String(data.formatVersion)}; this build reads versions ${GRAPH_FORMAT_VERSIONS.join(', ')}.`,
-    );
-  }
+  checkGraphFormat(data);
   const { header, buffers } = data;
   if (!Array.isArray(buffers) || buffers.length !== header.layout.length) {
     throw new RangeError('Serialised graph buffers do not match their layout.');
   }
+  return graphFromViews(
+    header,
+    (i, byteLength) => {
+      if (buffers[i].byteLength !== byteLength) return null;
+      return [buffers[i], 0];
+    },
+    options,
+  );
+}
+
+/**
+ * Views every layout entry through `locate(i, byteLength)` — a buffer and a byte offset aligned to the element
+ * size, or `null` when the stored size differs — and assembles the graph around those views.
+ */
+export function graphFromViews<P>(
+  header: GraphHeader,
+  locate: (index: number, byteLength: number) => [ArrayBufferLike, number] | null,
+  options: DeserializeOptions<P>,
+): RoutingGraph<P> {
   const arrays = new Map<string, Typed>();
   header.layout.forEach(([name, kind, length], i) => {
     const Ctor = CTOR[kind];
-    if (!Ctor || buffers[i].byteLength !== length * Ctor.BYTES_PER_ELEMENT) {
-      throw new RangeError(`Serialised graph buffer "${name}" has an unexpected size.`);
-    }
-    arrays.set(name, new Ctor(buffers[i] as ArrayBuffer, 0, length));
+    const at = Ctor ? locate(i, length * Ctor.BYTES_PER_ELEMENT) : null;
+    if (!at) throw new RangeError(`Serialised graph buffer "${name}" has an unexpected size.`);
+    arrays.set(name, new Ctor(at[0] as ArrayBuffer, at[1], length));
   });
   const get = <T extends Typed>(name: string): T => {
     const array = arrays.get(name);
@@ -214,26 +253,61 @@ export function graphFromTransferable<P = unknown>(
   }
 
   const V = header.stats.vertices >= 0 ? get<Float64Array>('vertices.x').length : 0;
-  const raw = get<Float64Array>('vertices.positions');
   const x = get<Float64Array>('vertices.x');
   const y = get<Float64Array>('vertices.y');
   const group = arrays.has('vertices.group') ? get<Int32Array>('vertices.group') : null;
-  const positions: Position[] = [];
-  for (let v = 0; v < V; v++) {
-    const z = raw[3 * v + 2];
-    positions.push(Number.isNaN(z) ? [raw[3 * v], raw[3 * v + 1]] : [raw[3 * v], raw[3 * v + 1], z]);
+  // One JS array per vertex is most of the heap of a loaded graph (~78 B a vertex) and of its load time, so
+  // positions that repeat `x` / `y` are made on demand from the typed arrays (`graph.position(v)`), and
+  // `vertices.positions` is built on first access. The binary form stores only z for them (`vertices.z`); the
+  // transferable form stores full positions, which are checked here.
+  const raw = arrays.get('vertices.positions');
+  let positionZ = raw ? undefined : ((arrays.get('vertices.z') as Float64Array | undefined) ?? null);
+  let eager: Position[] | null = null;
+  if (raw) {
+    let repeats = true;
+    let hasZ = false;
+    for (let v = 0; v < V && repeats; v++) {
+      repeats = Object.is(raw[3 * v], x[v]) && Object.is(raw[3 * v + 1], y[v]);
+      hasZ ||= !Number.isNaN(raw[3 * v + 2]);
+    }
+    if (repeats) {
+      positionZ = null;
+      if (hasZ) {
+        positionZ = new Float64Array(V);
+        for (let v = 0; v < V; v++) positionZ[v] = raw[3 * v + 2];
+      }
+    } else {
+      eager = [];
+      for (let v = 0; v < V; v++) {
+        const z = raw[3 * v + 2];
+        eager.push(Number.isNaN(z) ? [raw[3 * v], raw[3 * v + 1]] : [raw[3 * v], raw[3 * v + 1], z]);
+      }
+    }
   }
-  const store = VertexStore.fromArrays(
-    {
-      tolerance: header.settings.tolerance,
-      geographic: metric.geographic,
-      maxAbsLat: header.settings.maxAbsLat,
-    },
-    x,
-    y,
-    group,
-    positions,
-  );
+  let lazy: Position[] | null = null;
+  const positionsOf = (): readonly Position[] => {
+    if (eager) return eager;
+    if (!lazy) {
+      lazy = [];
+      for (let v = 0; v < V; v++) {
+        const z = positionZ ? positionZ[v] : NaN;
+        lazy.push(Number.isNaN(z) ? [x[v], y[v]] : [x[v], y[v], z]);
+      }
+    }
+    return lazy;
+  };
+  // Re-indexing every vertex is most of the load time, and only `findVertex` needs the index.
+  const store = () =>
+    VertexStore.fromArrays(
+      {
+        tolerance: header.settings.tolerance,
+        geographic: metric.geographic,
+        maxAbsLat: header.settings.maxAbsLat,
+      },
+      x,
+      y,
+      group,
+    );
 
   // Synthesised connector features travel in the header, so a worker can pass the input collection alone.
   const synthetic = (header.synthetic ?? []) as NetworkFeature<P>[];
@@ -293,7 +367,9 @@ export function graphFromTransferable<P = unknown>(
       count: V,
       x,
       y,
-      positions,
+      get positions() {
+        return positionsOf();
+      },
       node: get('vertices.node'),
       chain: get('vertices.chain'),
       chainPos: get('vertices.chainPos'),
@@ -350,6 +426,7 @@ export function graphFromTransferable<P = unknown>(
     },
     segmentIndex,
     store,
+    positionZ: eager ? undefined : positionZ,
     remap: get('remap'),
     groupKeys: header.groupKeys.map((k) => (k === null ? undefined : k)),
     levels: header.levels

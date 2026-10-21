@@ -181,11 +181,11 @@ export function diagnoseGraph(
       const a = chains.vertices[nearest + c];
       const b = chains.vertices[nearest + c + 1];
       projectToSegment(px, py, X[a], Y[a], X[b], Y[b], sx, sy, proj);
-      nearestDistance = metric.distance(vertices.positions[v], [proj.x, proj.y]);
+      nearestDistance = metric.distance(graph.position(v), [proj.x, proj.y]);
     }
     const featureIndex = segments.feature[slot];
     const report: DangleReport = {
-      location: vertices.positions[v],
+      location: graph.position(v),
       node: n,
       featureIndex,
       featureId: graph.featureId(featureIndex),
@@ -324,7 +324,7 @@ export function diagnoseGraph(
         seen.add(v);
         const featureIndex = segments.feature[slot];
         connectorEnds.push({
-          location: vertices.positions[v],
+          location: graph.position(v),
           featureIndex,
           featureId: graph.featureId(featureIndex),
           level: graph.groupKeys[group],

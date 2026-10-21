@@ -66,7 +66,10 @@ export interface VertexTable {
   readonly count: number;
   readonly x: Float64Array;
   readonly y: Float64Array;
-  /** Output coordinate of each vertex (the original input object where one exists). */
+  /**
+   * Output coordinate of each vertex (the original input object where one exists). A deserialised graph
+   * creates this array on first access only — prefer {@link RoutingGraph.position} for single vertices.
+   */
   readonly positions: readonly Position[];
   /** Node id, or -1 for interior chain vertices and dead vertices. */
   readonly node: Int32Array;
@@ -187,7 +190,14 @@ export interface RoutingGraphParts<P> {
   components: ComponentTable;
   heuristic: { dims: number; scale: number; perLevel: number };
   segmentIndex: PackedRTree;
-  store: VertexStore;
+  /**
+   * Deserialised graphs: z per vertex (`NaN` where none), or `null` for a flat graph, when every position
+   * repeats `x` / `y` — positions are then made from the typed arrays instead of kept as one array per
+   * vertex. Omitted (`undefined`) when `vertices.positions` is the source.
+   */
+  positionZ?: Float64Array | null;
+  /** The store, or a function that builds it on first use (deserialised graphs: only `findVertex` needs it). */
+  store: VertexStore | (() => VertexStore);
   remap: Int32Array;
   groupKeys: readonly (GroupKey | undefined)[];
   levels: LevelTable | null;
@@ -229,8 +239,9 @@ export class RoutingGraph<P = unknown> {
   readonly settings: GraphSettings;
   /** @internal */
   readonly diagnosticsLog: DiagnosticsLog | null;
-  /** @internal */
-  readonly store: VertexStore;
+  private storeOrFactory: VertexStore | (() => VertexStore);
+  /** @internal See {@link RoutingGraphParts.positionZ}. */
+  readonly positionZ: Float64Array | null | undefined;
   /** @internal */
   readonly remap: Int32Array;
   private vertexTree: { tree: PackedRTree; items: Int32Array } | null = null;
@@ -254,13 +265,31 @@ export class RoutingGraph<P = unknown> {
     this.components = parts.components;
     this.heuristic = parts.heuristic;
     this.segmentIndex = parts.segmentIndex;
-    this.store = parts.store;
+    this.storeOrFactory = parts.store;
+    this.positionZ = parts.positionZ;
     this.remap = parts.remap;
     this.groupKeys = parts.groupKeys;
     this.levels = parts.levels;
     this.syntheticFeatures = parts.syntheticFeatures;
     this.settings = parts.settings;
     this.diagnosticsLog = parts.diagnosticsLog;
+  }
+
+  /** @internal Vertex lookup by location (exact or within `tolerance`), built on first use when deserialised. */
+  get store(): VertexStore {
+    if (typeof this.storeOrFactory === 'function') this.storeOrFactory = this.storeOrFactory();
+    return this.storeOrFactory;
+  }
+
+  /**
+   * Output coordinate of vertex `v`: the original input object in a graph `buildGraph` made, a new
+   * `[x, y]` / `[x, y, z]` in a deserialised one (which keeps no array per vertex).
+   */
+  position(v: number): Position {
+    const z = this.positionZ;
+    if (z === undefined) return this.vertices.positions[v];
+    const { x, y } = this.vertices;
+    return z === null || Number.isNaN(z[v]) ? [x[v], y[v]] : [x[v], y[v], z[v]];
   }
 
   segmentCountOf(chain: number): number {
@@ -273,10 +302,9 @@ export class RoutingGraph<P = unknown> {
     const i = Math.floor(position);
     const f = position - i;
     const verts = this.chains.vertices;
-    const positions = this.vertices.positions;
-    if (f === 0) return positions[verts[base + i]];
-    const a = positions[verts[base + i]];
-    const b = positions[verts[base + i + 1]];
+    if (f === 0) return this.position(verts[base + i]);
+    const a = this.position(verts[base + i]);
+    const b = this.position(verts[base + i + 1]);
     const out = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
     if (a.length > 2 && b.length > 2) out.push(a[2] + (b[2] - a[2]) * f);
     return out;

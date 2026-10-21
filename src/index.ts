@@ -72,6 +72,14 @@ export type {
 } from './graph/diagnostics';
 export { GRAPH_FORMAT, GRAPH_FORMAT_VERSION, GRAPH_FORMAT_VERSIONS } from './graph/serialize';
 export type { DeserializeOptions, GraphHeader, SerializeOptions, TransferableGraph } from './graph/serialize';
+export {
+  GRAPH_BINARY_MAGIC,
+  GRAPH_BINARY_VERSION,
+  graphFromBinary,
+  graphToBinary,
+  inspectBinaryGraph,
+} from './graph/binary';
+export type { BinaryGraph, BinaryGraphInfo, BinaryGraphOptions } from './graph/binary';
 
 export { AlgorithmRegistry, builtinAlgorithms, createAlgorithmRegistry } from './algorithm/registry';
 export { astar } from './algorithm/astar';

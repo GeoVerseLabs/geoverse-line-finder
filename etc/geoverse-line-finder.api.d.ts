@@ -66,7 +66,7 @@ declare class VertexStore {
      * A store over existing vertex arrays (a deserialised graph). The arrays are used, not copied, and
      * indexed in vertex order, so every location is owned by the same vertex as in the store that built them.
      */
-    static fromArrays(options: VertexStoreOptions, x: Float64Array, y: Float64Array, group: Int32Array | null, positions: readonly Position[]): VertexStore;
+    static fromArrays(options: VertexStoreOptions, x: Float64Array, y: Float64Array, group: Int32Array | null, positions?: readonly Position[]): VertexStore;
     get size(): number;
     /** Returns the id of the vertex at (or within tolerance of) `position`, creating it when absent. */
     getOrAdd(position: Position, group?: number): number;
@@ -806,7 +806,10 @@ interface VertexTable {
     readonly count: number;
     readonly x: Float64Array;
     readonly y: Float64Array;
-    /** Output coordinate of each vertex (the original input object where one exists). */
+    /**
+     * Output coordinate of each vertex (the original input object where one exists). A deserialised graph
+     * creates this array on first access only — prefer {@link RoutingGraph.position} for single vertices.
+     */
     readonly positions: readonly Position[];
     /** Node id, or -1 for interior chain vertices and dead vertices. */
     readonly node: Int32Array;
@@ -922,7 +925,14 @@ interface RoutingGraphParts<P> {
         perLevel: number;
     };
     segmentIndex: PackedRTree;
-    store: VertexStore;
+    /**
+     * Deserialised graphs: z per vertex (`NaN` where none), or `null` for a flat graph, when every position
+     * repeats `x` / `y` — positions are then made from the typed arrays instead of kept as one array per
+     * vertex. Omitted (`undefined`) when `vertices.positions` is the source.
+     */
+    positionZ?: Float64Array | null;
+    /** The store, or a function that builds it on first use (deserialised graphs: only `findVertex` needs it). */
+    store: VertexStore | (() => VertexStore);
     remap: Int32Array;
     groupKeys: readonly (GroupKey | undefined)[];
     levels: LevelTable | null;
@@ -967,8 +977,9 @@ declare class RoutingGraph<P = unknown> {
     readonly settings: GraphSettings;
     /** @internal */
     readonly diagnosticsLog: DiagnosticsLog | null;
-    /** @internal */
-    readonly store: VertexStore;
+    private storeOrFactory;
+    /** @internal See {@link RoutingGraphParts.positionZ}. */
+    readonly positionZ: Float64Array | null | undefined;
     /** @internal */
     readonly remap: Int32Array;
     private vertexTree;
@@ -979,6 +990,13 @@ declare class RoutingGraph<P = unknown> {
     private incident;
     private ordinals;
     constructor(parts: RoutingGraphParts<P>);
+    /** @internal Vertex lookup by location (exact or within `tolerance`), built on first use when deserialised. */
+    get store(): VertexStore;
+    /**
+     * Output coordinate of vertex `v`: the original input object in a graph `buildGraph` made, a new
+     * `[x, y]` / `[x, y, z]` in a deserialised one (which keeps no array per vertex).
+     */
+    position(v: number): Position;
     segmentCountOf(chain: number): number;
     /** Coordinate at fractional `position` (segment index + t) along `chain`. */
     pointAt(chain: number, position: number): Position;
@@ -1674,6 +1692,84 @@ interface LevelFeatureCollection {
 declare function toLevelFeatures<P>(result: RouteResult<P>): LevelFeatureCollection;
 
 /**
+ * One self-contained file for a prebuilt graph, to publish next to the data (CDN, IndexedDB, a Worker's
+ * response) so a client loads the graph instead of building it.
+ *
+ * ```text
+ * 0   8  magic "GVLFGRPH"
+ * 8   4  u32 container version (GRAPH_BINARY_VERSION)
+ * 12  4  u32 flags (bit 0 / bit 1: the header / features JSON tags non-finite numbers and -0)
+ * 16  4  u32 header byte length H
+ * 20  4  reserved (0)
+ * 24  H  header JSON (UTF-8): graph header, aliases, landmark sizes, the caller's `meta`
+ *        then, each starting on an 8-byte boundary: the source features as JSON (UTF-8) when stored, the
+ *        graph's arrays in `header.graph.header.layout` order, then the landmark nodes, d(L, v) and d(v, L);
+ *        arrays are little-endian
+ * ```
+ *
+ * Features sit outside the header so that {@link inspectBinaryGraph} reads `meta` without parsing them, and a
+ * caller that passes its own features skips them entirely.
+ */
+declare const GRAPH_BINARY_MAGIC = "GVLFGRPH";
+/** Container version this build writes and reads (the graph inside carries its own format version). */
+declare const GRAPH_BINARY_VERSION = 1;
+interface BinaryGraphOptions {
+    /** ALT landmarks to store with the graph, so clients skip preparing them too. */
+    landmarks?: LandmarkTable | null;
+    /**
+     * Store the source features (as JSON) so the file alone gives `sections[].properties` / `id` and feature
+     * details in `candidates()`. Off by default: publish the GeoJSON separately, or route without properties.
+     */
+    features?: boolean;
+    /**
+     * The caller's metadata (JSON), returned by {@link graphFromBinary} and {@link inspectBinaryGraph} — say the
+     * data version, a hash of the build options and the build time — so a service can tell a stale file from a
+     * fresh one without loading the graph.
+     */
+    meta?: Readonly<Record<string, unknown>> | null;
+}
+/** What {@link graphFromBinary} returns: the graph, the landmarks stored with it and the caller's `meta`. */
+interface BinaryGraph<P = unknown> {
+    graph: RoutingGraph<P>;
+    landmarks: LandmarkTable | null;
+    meta: Readonly<Record<string, unknown>> | null;
+}
+/** What {@link inspectBinaryGraph} reads from a file's header. */
+interface BinaryGraphInfo {
+    /** Container version (see {@link GRAPH_BINARY_VERSION}). */
+    version: number;
+    /** Format version of the graph inside (see `GRAPH_FORMAT_VERSIONS`). */
+    formatVersion: number;
+    meta: Readonly<Record<string, unknown>> | null;
+    metric: string;
+    stats: Readonly<GraphStats>;
+    /** Stored landmarks (0 when none). */
+    landmarks: number;
+    /** Whether the source features are stored. */
+    features: boolean;
+    /** Size of the complete file, to check for truncation before loading. */
+    byteLength: number;
+}
+/**
+ * Packs a graph (and optionally its landmarks, source features and the caller's metadata) into one versioned
+ * binary file. Costs are baked in: the file is tied to the weighting and options the graph was built with.
+ */
+declare function graphToBinary(graph: RoutingGraph<unknown>, options?: BinaryGraphOptions): Uint8Array;
+/**
+ * Reads a file's header — the caller's `meta`, the graph's stats and what is stored — without loading the
+ * graph or parsing stored features. Only the bytes up to the end of the header are needed, so a service can
+ * check a file (or the first kilobytes of a download) before committing to it.
+ */
+declare function inspectBinaryGraph(data: ArrayBufferLike | ArrayBufferView): BinaryGraphInfo;
+/**
+ * Loads a file written by {@link graphToBinary}. The graph views the bytes in place — keep them unchanged
+ * and do not transfer them while the graph is in use. Input that is not 8-byte aligned (a Node `Buffer` from
+ * the shared pool, say) is copied once. Stored features are used unless `options.features` is given, in which
+ * case they are not even parsed.
+ */
+declare function graphFromBinary<P = unknown>(data: ArrayBufferLike | ArrayBufferView, options?: DeserializeOptions<P>): BinaryGraph<P>;
+
+/**
  * A* search. With the built-in heuristic (metric embedding × minimum cost-per-length, see
  * `graph/build.ts`) it is admissible and consistent for **any** weight function, so it returns the same
  * optimal cost as Dijkstra while settling far fewer nodes. Closed nodes are re-opened if a custom,
@@ -1717,4 +1813,4 @@ declare class FourAryHeap implements Heap {
     private siftDown;
 }
 
-export { type AlgorithmCapabilities, AlgorithmRegistry, type CandidateCost, type CandidateDistinct, type CandidateFilter, type CandidateInfo, type CandidateOptions, type CandidateReport, type CandidateSide, type CandidateStatus, type ChainTable, type ComponentReport, type ComponentTable, type ConnectorDirection, type ConnectorEndReport, type ConnectorMode, type DangleReport, type DeserializeOptions, type DiagnosticList, type DiagnosticsLog, type DiagnosticsOptions, type DirectionalWeight, EARTH_RADIUS_M, type EdgeTable, type FailurePolicy, FourAryHeap, GRAPH_FORMAT, GRAPH_FORMAT_VERSION, GRAPH_FORMAT_VERSIONS, type GeometryLike, type GraphDiagnostics, type GraphHeader, type GraphOptions, type GraphSettings, type GraphStats, type GroupFunction, type GroupKey, type Heap, type HeapConstructor, type Heuristic, type InvalidCoordinateReport, type LandmarkOptions, type LandmarkStrategy, LandmarkTable, type LevelFeature, type LevelFeatureCollection, type LevelFeatureKind, type LevelFeatureProperties, type LevelInfo, type LevelKey, type LevelReachability, type LevelTable, type LevelTransition, type LevelsOption, LineFinder, type LineFinderOptions, type LineStringFeature, type ManyOptions, type ManyResult, type MatrixResult, type Metric, type MetricOption, type NearestResult, type NetworkCollection, type NetworkFeature, type NodeChainTable, type NodeIdContext, type NodeIdFunction, type NodeKey, type NodeTable, type OverlapReport, type PathAlgorithm, type PointConnector, type PointConnectorFunction, type PointFeature, type PointGeometry, type Position, type PropertyWeightOptions, type RepairReport, type ReverseEdgeTable, type RouteFailure, type RouteFailureDetail, type RouteFailureReason, type RouteLeg, type RouteOptions, type RouteResult, type RouteSection, type RouteSuccess, type RouteSummary, RoutingGraph, type SearchBudget, type SearchGraph, type SearchRequest, type SearchResult, SearchScratch, type SectionsDetail, type SegmentTable, type SerializeOptions, type SkippedWaypoint, type SnapConnectivity, type SnapCostMode, type SnapMode, type SnapOptions, type SnapSelection, type SnappedWaypoint, type SpeedWeightOptions, type StrongComponents, type TargetPath, type TransferableGraph, type TransferableLandmarks, type TravelDirection, type VertexTable, type VerticalConnector, type WaypointAccess, type WaypointContext, type WaypointInput, type WaypointObject, type WaypointRole, type WaypointSnapOptions, type WeightContext, type WeightFunction, type WeightResult, type ZeroWeight, astar, bidirectionalDijkstra, buildGraph, builtinAlgorithms, cheapRulerMetric, createAlgorithmRegistry, createPropertyWeight, createSpeedWeight, dijkstra, directional, distanceWeight, euclideanMetric, haversineDistance, haversineMetric, osmDirection, prepareLandmarks, reconstructPath, toLevelFeatures, toLineString };
+export { type AlgorithmCapabilities, AlgorithmRegistry, type BinaryGraph, type BinaryGraphInfo, type BinaryGraphOptions, type CandidateCost, type CandidateDistinct, type CandidateFilter, type CandidateInfo, type CandidateOptions, type CandidateReport, type CandidateSide, type CandidateStatus, type ChainTable, type ComponentReport, type ComponentTable, type ConnectorDirection, type ConnectorEndReport, type ConnectorMode, type DangleReport, type DeserializeOptions, type DiagnosticList, type DiagnosticsLog, type DiagnosticsOptions, type DirectionalWeight, EARTH_RADIUS_M, type EdgeTable, type FailurePolicy, FourAryHeap, GRAPH_BINARY_MAGIC, GRAPH_BINARY_VERSION, GRAPH_FORMAT, GRAPH_FORMAT_VERSION, GRAPH_FORMAT_VERSIONS, type GeometryLike, type GraphDiagnostics, type GraphHeader, type GraphOptions, type GraphSettings, type GraphStats, type GroupFunction, type GroupKey, type Heap, type HeapConstructor, type Heuristic, type InvalidCoordinateReport, type LandmarkOptions, type LandmarkStrategy, LandmarkTable, type LevelFeature, type LevelFeatureCollection, type LevelFeatureKind, type LevelFeatureProperties, type LevelInfo, type LevelKey, type LevelReachability, type LevelTable, type LevelTransition, type LevelsOption, LineFinder, type LineFinderOptions, type LineStringFeature, type ManyOptions, type ManyResult, type MatrixResult, type Metric, type MetricOption, type NearestResult, type NetworkCollection, type NetworkFeature, type NodeChainTable, type NodeIdContext, type NodeIdFunction, type NodeKey, type NodeTable, type OverlapReport, type PathAlgorithm, type PointConnector, type PointConnectorFunction, type PointFeature, type PointGeometry, type Position, type PropertyWeightOptions, type RepairReport, type ReverseEdgeTable, type RouteFailure, type RouteFailureDetail, type RouteFailureReason, type RouteLeg, type RouteOptions, type RouteResult, type RouteSection, type RouteSuccess, type RouteSummary, RoutingGraph, type SearchBudget, type SearchGraph, type SearchRequest, type SearchResult, SearchScratch, type SectionsDetail, type SegmentTable, type SerializeOptions, type SkippedWaypoint, type SnapConnectivity, type SnapCostMode, type SnapMode, type SnapOptions, type SnapSelection, type SnappedWaypoint, type SpeedWeightOptions, type StrongComponents, type TargetPath, type TransferableGraph, type TransferableLandmarks, type TravelDirection, type VertexTable, type VerticalConnector, type WaypointAccess, type WaypointContext, type WaypointInput, type WaypointObject, type WaypointRole, type WaypointSnapOptions, type WeightContext, type WeightFunction, type WeightResult, type ZeroWeight, astar, bidirectionalDijkstra, buildGraph, builtinAlgorithms, cheapRulerMetric, createAlgorithmRegistry, createPropertyWeight, createSpeedWeight, dijkstra, directional, distanceWeight, euclideanMetric, graphFromBinary, graphToBinary, haversineDistance, haversineMetric, inspectBinaryGraph, osmDirection, prepareLandmarks, reconstructPath, toLevelFeatures, toLineString };

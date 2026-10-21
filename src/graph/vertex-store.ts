@@ -142,11 +142,12 @@ export class VertexStore {
     x: Float64Array,
     y: Float64Array,
     group: Int32Array | null,
-    positions: readonly Position[],
+    positions?: readonly Position[],
   ): VertexStore {
     const store = new VertexStore(options, { x, y, group: group ?? new Int32Array(x.length) });
     for (let id = 0; id < x.length; id++) {
-      store.positions.push(positions[id]);
+      // Lookups read only the coordinate arrays; positions are kept when given.
+      if (positions) store.positions.push(positions[id]);
       store.count = id + 1;
       store.index(id);
     }

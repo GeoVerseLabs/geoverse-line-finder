@@ -61,9 +61,20 @@ for (const [name, lib] of Object.entries(builds)) {
     ],
     { snap: { selection: 'optimal', costMode: 'ends' }, totals: { includeSnapWeight: true } },
   );
+  // The same graph through a binary file, with metadata readable from the header alone.
+  const file = lib.graphToBinary(finder.graph, { meta: { version: 7 } });
+  const fromFile = lib.graphFromBinary(file);
+  const loaded = new lib.LineFinder(fromFile.graph).route([
+    [2, 1],
+    [9, 8],
+  ]);
   check(
     name,
     route.ok &&
+      loaded.ok &&
+      loaded.weight === route.weight &&
+      fromFile.meta?.version === 7 &&
+      lib.inspectBinaryGraph(file).byteLength === file.length &&
       Math.abs(route.weight - 16) < 1e-9 &&
       lib.toLineString(route)?.geometry.coordinates.length === 3 &&
       optimal.ok &&
@@ -72,17 +83,22 @@ for (const [name, lib] of Object.entries(builds)) {
   );
 }
 
-// A graph serialised on the main thread, transferred, rebuilt and queried in a worker.
+// A graph serialised on the main thread, transferred, rebuilt and queried in a worker — as transferable
+// buffers, then as one binary file.
 const graph = new builds.esm.LineFinder(network, { metric: 'euclidean' }).graph;
 const data = graph.toTransferable();
+const file = builds.esm.graphToBinary(graph);
 const worker = new Worker(new URL('./smoke-worker.mjs', import.meta.url));
-const weight = await new Promise((resolve, reject) => {
-  worker.once('message', resolve);
-  worker.once('error', reject);
-  worker.postMessage(data, data.buffers);
-});
+const ask = (message, transfer) =>
+  new Promise((resolve, reject) => {
+    worker.once('message', resolve);
+    worker.once('error', reject);
+    worker.postMessage(message, transfer);
+  });
+const weight = await ask(data, data.buffers);
+const binaryWeight = await ask(file.buffer, [file.buffer]);
 await worker.terminate();
-check('worker', weight === 16);
+check('worker', weight === 16 && binaryWeight === 16);
 
 console.log(`node ${process.version}: dist smoke test ${failed ? 'FAILED' : 'passed'}`);
 if (failed) process.exit(1);
