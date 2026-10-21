@@ -28,8 +28,9 @@ The 0.1.0 baseline in `features.ts` is the package published on npm, installed a
 pnpm bench                                   # 5 rounds of 300 pairs by default
 pnpm bench -- --rounds 7 --pairs 500
 pnpm bench -- --only osm                     # any of network,large,osm
-pnpm bench:features                          # all of regression,build,alt,bidirectional,optimal,levels,quality
+pnpm bench:features                          # all of regression,build,binary,alt,bidirectional,optimal,levels,quality
 pnpm bench:features -- --only build --against <another build's dist/index.js>   # graph builds against any build (default 0.1.0)
+pnpm bench:features -- --only binary         # building a graph / landmarks vs loading a prebuilt file, with file sizes (pnpm build first)
 pnpm bench:features -- --only alt,optimal
 NODE_OPTIONS=--expose-gc pnpm bench          # force a GC before every run to reduce noise
 ```

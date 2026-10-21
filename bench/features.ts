@@ -1,10 +1,11 @@
 /**
  * Benchmarks for the features since 0.2.0.
  *
- *   pnpm bench:features [--rounds 5] [--pairs 300] [--only regression,build,alt,bidirectional,optimal,levels,quality]
+ *   pnpm bench:features [--rounds 5] [--pairs 300] [--only regression,build,binary,alt,bidirectional,optimal,levels,quality]
  *
  * - regression: default configurations against the published 0.1.0 (npm alias `glf-baseline`);
  * - build: graph construction alone against 0.1.0, plus node ids and a multi-level tower;
+ * - binary: building a graph (and its landmarks) against loading them from a binary file, with file sizes;
  * - alt: A* with and without landmarks; bidirectional: Dijkstra variants without a heuristic;
  * - optimal: nearest vs. optimal selection on the synthetic warehouse (292 tasks × 8 waypoints);
  * - levels: the level-aware A* bound on a 30-storey building (timings plus settled-node counts);
@@ -43,7 +44,9 @@ const arg = (name: string, fallback: string) => {
 };
 const ROUNDS = Math.max(3, Number(arg('rounds', '5')));
 const PAIRS = Number(arg('pairs', '300'));
-const ONLY = new Set(arg('only', 'regression,build,alt,bidirectional,optimal,levels,quality').split(','));
+const ONLY = new Set(
+  arg('only', 'regression,build,binary,alt,bidirectional,optimal,levels,quality').split(','),
+);
 
 function dataDir(): string {
   const candidates = [
@@ -466,6 +469,74 @@ if (ONLY.has('build')) {
     );
   }
   const text = lines.join('\n');
+  console.log(`\n${text}\n`);
+  sections.push(text, '');
+}
+
+if (ONLY.has('binary')) {
+  // What a client saves by loading a prebuilt file (graphToBinary) instead of building: the graph, and the
+  // ALT landmarks stored with it. Built artefacts; a load sample is the mean of LOADS consecutive loads.
+  const lib = (await import(new URL('../dist/index.js', import.meta.url).href)) as typeof import('../src');
+  const { gzipSync, brotliCompressSync, constants } = await import('node:zlib');
+  const geojson = Buffer.from(JSON.stringify(large));
+  const LOADS = 20;
+  const BUILDS = 5;
+  const mb = (n: number) => (n / 1e6).toFixed(2);
+  const brotli = (b: Uint8Array) =>
+    brotliCompressSync(b, { params: { [constants.BROTLI_PARAM_QUALITY]: 9 } }).length;
+  const sizes = [
+    `GeoJSON input: ${mb(geojson.length)} MB · gzip ${mb(gzipSync(geojson).length)} MB · brotli ${mb(brotli(geojson))} MB`,
+    '',
+  ];
+  const lines = [
+    '### Binary graph files: build vs load (dist)',
+    '',
+    `${ROUNDS} samples (+1 warm-up) · build = mean of ${BUILDS} builds, load = mean of ${LOADS} loads · ms`,
+    '',
+    '| network · weighting | build graph | load graph | speed-up | 8 landmarks: prepare | stored: load graph + landmarks | file MB (gzip / brotli) |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+  ];
+  const cases: [label: string, options: object][] = [
+    ['large-network · distance', {}],
+    ['large-network · OSM travel time', { weight: osm }],
+  ];
+  for (const [label, options] of cases) {
+    const graph = lib.buildGraph(large as never, options as never);
+    const landmarks = lib.prepareLandmarks(graph, { count: 8 });
+    const file = lib.graphToBinary(graph);
+    const full = lib.graphToBinary(graph, { landmarks });
+    const build: number[] = [];
+    const load: number[] = [];
+    const prepare: number[] = [];
+    const loadFull: number[] = [];
+    for (let round = 0; round <= ROUNDS; round++) {
+      gc?.();
+      let t0 = performance.now();
+      for (let i = 0; i < BUILDS; i++) lib.buildGraph(large as never, options as never);
+      const b = (performance.now() - t0) / BUILDS;
+      gc?.();
+      t0 = performance.now();
+      for (let i = 0; i < LOADS; i++) lib.graphFromBinary(file);
+      const l = (performance.now() - t0) / LOADS;
+      t0 = performance.now();
+      lib.prepareLandmarks(graph, { count: 8 });
+      const p = performance.now() - t0;
+      gc?.();
+      t0 = performance.now();
+      for (let i = 0; i < LOADS; i++) lib.graphFromBinary(full);
+      const f = (performance.now() - t0) / LOADS;
+      if (round > 0) {
+        build.push(b);
+        load.push(l);
+        prepare.push(p);
+        loadFull.push(f);
+      }
+    }
+    lines.push(
+      `| ${label} | ${fmt(build)} | ${fmt(load)} | ${(median(build) / median(load)).toFixed(1)}× | ${fmt(prepare)} | ${fmt(loadFull)} | ${mb(file.length)} (${mb(gzipSync(file).length)} / ${mb(brotli(file))}); with landmarks ${mb(full.length)} |`,
+    );
+  }
+  const text = [...lines, '', ...sizes].join('\n');
   console.log(`\n${text}\n`);
   sections.push(text, '');
 }

@@ -28,8 +28,9 @@
 pnpm bench                                   # 默认 5 轮、每轮 300 对
 pnpm bench -- --rounds 7 --pairs 500
 pnpm bench -- --only osm                     # network,large,osm 任选
-pnpm bench:features                          # regression,build,alt,bidirectional,optimal,levels,quality 全部
+pnpm bench:features                          # regression,build,binary,alt,bidirectional,optimal,levels,quality 全部
 pnpm bench:features -- --only build --against <其他版本的 dist/index.js>   # 建图对照任意构建产物（默认 0.1.0）
+pnpm bench:features -- --only binary         # 建图 / 准备地标 vs 加载预构建图文件，附文件体积（先 pnpm build）
 pnpm bench:features -- --only alt,optimal
 NODE_OPTIONS=--expose-gc pnpm bench          # 每次运行前强制 GC，降低噪声
 ```
