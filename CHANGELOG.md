@@ -4,6 +4,26 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)；0.x 期间，次版本号可能包含不兼容变更。
 
+## 未发布
+
+### 新增：预构建图文件
+
+- **`graphToBinary(graph, { landmarks?, features? })` / `graphFromBinary(bytes, { features?, metric? })`**：把图打成一个带版本号的二进制文件（`Uint8Array`），可连同 ALT 地标表与源要素，发布到 CDN、存进 IndexedDB 或从 Worker 返回；客户端加载即可查询，不再建图、不再准备地标。返回 `{ graph, landmarks }`，可直接交给 `new LineFinder(graph, { landmarks })`。
+- 格式：24 字节前导（魔数 `GVLFGRPH`、容器版本 `GRAPH_BINARY_VERSION`、标志位、头部长度）+ JSON 头 + 每张表一段（8 字节对齐、小端序）。加载时各表直接视图读取传入的字节，不复制；未对齐的输入复制一次；大端主机逐段翻转字节。内含的图沿用 `toTransferable` 的格式版本与校验。
+- 13.5 万坐标路网上加载约 4 ms，建图约 90 ms（约 20 倍），连同 8 个地标时加载时间几乎不变（[docs/BENCHMARK.md](docs/BENCHMARK.md) §5.8）。文件**省 CPU 不省流量**：派生浮点数难以压缩，brotli 后约为 GeoJSON 的 3.5～5.6 倍。
+- **`meta` 与 `inspectBinaryGraph(bytes)`**：写入时可带调用方的元数据（数据版本、建图参数哈希等，JSON），加载时原样返回；`inspectBinaryGraph` 只解析文件头，返回 `meta`、统计、是否带地标 / 要素与完整文件长度，供服务在加载前判断文件是否过期或被截断。源要素放在 JSON 头之外的独立段：读元数据不必解析要素，调用方自带要素时内嵌的那份也不解析。
+- 金样本测试新增断言：24 种路网与配置经二进制文件往返后，每张表、惰性索引与诊断逐字节相同。
+
+### 改进
+
+- 反序列化的图（`fromTransferable` / `graphFromBinary`）推迟重建顶点哈希表，直到第一次按坐标找顶点（`snap.mode: 'exact'`）；它原本占加载时间的约 3/4。
+- 反序列化的图不再为每个顶点保留 JS 坐标数组：新增 `graph.position(v)`，从 x / y / z 类型化数组按需生成坐标，路线、吸附与诊断都改走它；`vertices.positions` 保持可用，首次访问才整体生成。13.5 万坐标路网加载约 4 → 1.5 ms、堆内存 8.1 → 0.9 MB；217 万坐标 194 → 27 ms、128 → 12 MB；查询速度不变。现场建的图行为不变（仍返回原始输入坐标对象）。
+
+### 体积
+
+- 消费者包（只导入 `LineFinder`）34 917 B gzip（+0.3 KB，来自上面两项改进）；编解码与检查函数约 2.0 KB，不导入时被摇树掉，只计入 IIFE：39 266 B。IIFE 门禁由 38 000 上调至 39 500 B。
+- `check:size` 新增摇树检查：用 esbuild 与 Rollup（经 Vite）分别打包"只导入 `LineFinder`"，产物里不得出现二进制模块的代码。Rollup 无法证明 `new Uint16Array` 无副作用，字节序检测因此标注了 `/* @__PURE__ */`。
+
 ## 0.3.0 — 2026-09-29
 
 默认配置（不用 `group` / `levels` / `nodeId` / `pointConnector`）下的输出仍与 0.1.0 逐位相同（金样本测试不变）；建图产物——顶点编号、线段顺序、链、CSR、R 树、诊断——与改动前逐字节相同（新增建图金样本 `test/graph-golden.test.ts`，覆盖 24 种路网与配置）。以下只影响使用连通分组、楼层语义、吸附约束或新选项的场景。

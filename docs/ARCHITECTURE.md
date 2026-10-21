@@ -272,7 +272,9 @@ h(u) = scale · |e(u) − e(t)| + perLevel · dist(ord(u), 目标所在楼层区
 
 ### 7.4 序列化
 
-`toTransferable()` 把全部表、R 树数组、分组键与诊断日志拷贝进独立的 `ArrayBuffer`（`shared: true` 时为 `SharedArrayBuffer`），头部带格式名、版本与按名称的布局表；原图不受影响，缓冲区可以直接作为 `postMessage` 的转移列表。`fromTransferable()` 校验格式、版本与每个缓冲区的字节数，用类型化数组视图**零拷贝**恢复各表，直接在收到的坐标数组上按顶点顺序重建 `VertexStore` 的哈希索引（`VertexStore.fromArrays`，不拷贝坐标；因此 id、位置的主人与合并行为一致），用 `PackedRTree.fromData` 恢复 R 树。内置度量按名称与参考纬度重建，自定义度量必须由调用方传入同名对象；要素属性不序列化，需要 `sections.properties` 时传入原要素。地标表单独序列化。
+`toTransferable()` 把全部表、R 树数组、分组键与诊断日志拷贝进独立的 `ArrayBuffer`（`shared: true` 时为 `SharedArrayBuffer`），头部带格式名、版本与按名称的布局表；原图不受影响，缓冲区可以直接作为 `postMessage` 的转移列表。`fromTransferable()` 校验格式、版本与每个缓冲区的字节数，用类型化数组视图**零拷贝**恢复各表，在收到的坐标数组上按顶点顺序重建 `VertexStore` 的哈希索引（`VertexStore.fromArrays`，不拷贝坐标；因此 id、位置的主人与合并行为一致）——这一步占加载时间的大头，而只有按坐标找顶点（`findVertex`，即 `snap.mode: 'exact'`）用得到，所以推迟到第一次使用时才做；用 `PackedRTree.fromData` 恢复 R 树。内置度量按名称与参考纬度重建，自定义度量必须由调用方传入同名对象；要素属性不序列化，需要 `sections.properties` 时传入原要素。地标表单独序列化。
+
+**二进制文件**（`graphToBinary` / `graphFromBinary` / `inspectBinaryGraph`）把同一份布局装进一个 `ArrayBuffer`，作为可发布的预构建产物：24 字节前导（魔数 `GVLFGRPH`、容器版本、标志位、头部长度）+ UTF-8 JSON 头（图的格式名 / 版本 / 头部、别名表、地标尺寸、调用方的 `meta`）+ 可选的源要素 JSON 段 + 每张表一段，各段按 8 字节对齐、表为小端序。源要素不放进 JSON 头，所以 `inspectBinaryGraph` 只读头部就能拿到 `meta` 与统计（可用文件的前几 KB 判断是否过期），调用方自带要素时内嵌的那份不解析。读取时各表直接是这个缓冲区上的视图，地标表也是，不复制；未对齐的输入先复制一次，大端主机逐段翻转字节后复制。两处只在文件里做的压缩：`positions` 与 `x` / `y` 逐位重复时只存 z（平面路网什么都不存）；逐字节相同的表（默认长度权重下两个方向的代价都等于长度）只存一份，读出后共用同一段内存——图本来就只读。JSON 表达不了的数（`NaN`、`±Infinity`、`-0`）在头部打标签，标志位为 0 时解析不走 reviver。**反序列化的图不为每个顶点保留坐标数组**：`positions` 与 `x` / `y` 逐位重复时（二进制只存 z；可转移形式读入时逐顶点核对），`graph.position(v)` 从类型化数组现造 `[x, y]` / `[x, y, z]`，路线拼装、吸附与诊断都走它；`vertices.positions` 保持兼容，首次访问才整体生成。原先这些数组约 78 B/顶点，占加载后堆内存与加载时间的大头。现场建的图仍返回原始输入坐标对象，行为不变。没做的：派生表（R 树、长度、嵌入）不在加载时重算——重建 R 树一项就要约 15 ms，是现在加载时间的 10 倍；所以文件省 CPU 不省流量，压缩后仍是 GeoJSON 的数倍。字节序检测标注了 `/* @__PURE__ */`：Rollup 不能证明 `new Uint16Array` 无副作用，不标注时只导入 `LineFinder` 也会留下它（`check:size` 对 esbuild 与 Rollup 都检查）。
 
 ## 8. 正确性保障与 GPF 次优问题的根因
 

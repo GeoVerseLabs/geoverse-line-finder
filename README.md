@@ -356,6 +356,33 @@ const finder = new LineFinder(graph);
 
 地标表同样可以 `table.toTransferable()` / `LandmarkTable.fromTransferable()`。使用自定义度量对象时，反序列化需要传入同名的 `metric`。
 
+### 预构建图文件
+
+把建好的图（可连同 ALT 地标、源要素）打成一个带版本号的二进制文件，放在 CDN、IndexedDB 或 Worker 的响应里，客户端直接加载、不再建图：
+
+```ts
+// 构建端（Node 脚本、CI 或首次建图后）
+const graph = buildGraph(roads, { weight });
+const landmarks = prepareLandmarks(graph, { count: 8 });
+const meta = { dataVersion: '2026-10-21T08:00Z', options: 'osm-v3' }; // 自己的失效判据，原样带回
+writeFileSync('roads.graph.bin', graphToBinary(graph, { landmarks, meta })); // features: true 可把源要素一并写入
+
+// 客户端 / 服务端
+const bytes = await (await fetch('/roads.graph.bin')).arrayBuffer();
+if (inspectBinaryGraph(bytes).meta?.dataVersion !== expectedVersion) {
+  /* 文件过期：只读了头部，图还没加载 */
+}
+const { graph, landmarks } = graphFromBinary(bytes, { features: roads.features }); // features 可选
+const finder = new LineFinder(graph, { landmarks: landmarks ?? undefined });
+```
+
+- 13.5 万坐标路网：建图约 80～90 ms、准备 8 个地标 35～115 ms；加载文件约 1.5 ms（连同地标，地标零拷贝），见 [docs/BENCHMARK.md](docs/BENCHMARK.md) §5.8。
+- 加载后的图不为每个顶点保留 JS 坐标数组（`graph.position(v)` 按需生成，`vertices.positions` 首次访问才整体生成），堆内存约为现场建图的 1/10；多个 Worker 可共享同一个 `SharedArrayBuffer`。
+- `inspectBinaryGraph(bytes)` 只解析文件头：返回 `meta`、统计、是否带地标 / 要素与完整文件长度，用来在加载前判断文件是否过期或被截断。
+- 只导入 `LineFinder` 等而不用这几个函数时，打包器（esbuild、Rollup / Vite）会把二进制相关代码整体摇掉——`pnpm check:size` 对两种打包器都做检查。
+- 文件是**省 CPU、不省流量**的：代价、长度、R 树等派生浮点数几乎压缩不动，brotli 后约为 GeoJSON 的 3.5～5.6 倍。适合建图贵（移动端、启用地标）或可本地缓存的场景；流量敏感时仍发 GeoJSON 在端上建图。
+- 代价已写死在文件里：换权重、换建图选项就要重新生成。加载后图直接视图读取传入的字节，使用期间不要改动或转移它们；未按 8 字节对齐的输入（如 Node `Buffer` 池里的切片）会先复制一次。
+
 ## 从 geojson-path-finder 迁移
 
 | geojson-path-finder                                    | geoverse-line-finder                                                |

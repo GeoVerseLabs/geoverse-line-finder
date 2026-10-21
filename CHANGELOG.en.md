@@ -4,6 +4,26 @@
 
 This project follows [Semantic Versioning](https://semver.org/); while in 0.x, minor versions may contain breaking changes.
 
+## Unreleased
+
+### New: prebuilt graph files
+
+- **`graphToBinary(graph, { landmarks?, features? })` / `graphFromBinary(bytes, { features?, metric? })`**: pack a graph into one versioned binary file (a `Uint8Array`), optionally with its ALT landmark table and source features, to publish on a CDN, keep in IndexedDB or return from a worker; clients load it and query right away, without building the graph or preparing landmarks. Returns `{ graph, landmarks }`, ready for `new LineFinder(graph, { landmarks })`.
+- Format: a 24-byte prelude (magic `GVLFGRPH`, container version `GRAPH_BINARY_VERSION`, flags, header length), a JSON header, then one section per table (8-byte aligned, little-endian). On load every table is a view of the given bytes, with no copies; unaligned input is copied once; a big-endian host swaps each section. The graph inside keeps the `toTransferable` format version and checks.
+- On a 135 k-coordinate network loading takes about 4 ms against about 90 ms to build (about 20×), and stays the same with 8 landmarks stored ([docs/BENCHMARK.en.md](docs/BENCHMARK.en.md) §5.8). The file **saves CPU, not bandwidth**: derived doubles barely compress, so with brotli it is 3.5–5.6× the GeoJSON.
+- **`meta` and `inspectBinaryGraph(bytes)`**: the caller's metadata (data version, a hash of the build options — JSON) goes into the file and comes back on load; `inspectBinaryGraph` parses the header only and returns `meta`, the stats, whether landmarks / features are stored and the full file length, so a service can tell a stale or truncated file before loading it. Source features sit in their own section outside the JSON header: reading the metadata does not parse them, and neither does a load that brings its own features.
+- The golden-graph test now also asserts that all 24 networks and configurations come back from a binary file with every table, lazy index and diagnostic byte-identical.
+
+### Improvements
+
+- Deserialised graphs (`fromTransferable` / `graphFromBinary`) rebuild the vertex hash index only on the first vertex lookup by location (`snap.mode: 'exact'`); it used to be about three quarters of the load time.
+- Deserialised graphs no longer keep a JS coordinate array per vertex: the new `graph.position(v)` makes coordinates on demand from the x / y / z typed arrays, and routes, snapping and diagnostics use it; `vertices.positions` remains and is built on first access. A 135 k-coordinate network loads in about 1.5 ms instead of 4 with a heap of 0.9 MB instead of 8.1; at 2.17 M coordinates 27 ms instead of 194 and 12 MB instead of 128; queries are as fast as before. Graphs `buildGraph` makes behave as before (they still return the original input coordinate objects).
+
+### Size
+
+- Consumer bundle (`LineFinder` only) 34,917 B gzip (+0.3 KB, the two improvements above); the encoder / decoder / inspector, about 2.0 KB, tree-shake away unless imported and only count in the IIFE: 39,266 B. The IIFE limit goes from 38,000 to 39,500 B.
+- `check:size` now also checks tree-shaking: a `LineFinder`-only bundle made with esbuild and with Rollup (through Vite) must contain none of the binary-file code. Rollup cannot prove `new Uint16Array` free of side effects, so the byte-order probe is annotated `/* @__PURE__ */`.
+
 ## 0.3.0 — 2026-09-29
 
 With default options (no `group` / `levels` / `nodeId` / `pointConnector`) the output is still bit-identical to 0.1.0 (golden tests unchanged), and the built graph — vertex numbering, segment order, chains, CSR, R-tree, diagnostics — is byte-for-byte what it was before the changes (new golden graphs in `test/graph-golden.test.ts`, 24 networks and configurations). The changes below only affect connectivity groups, level semantics, snap constraints and the new options.

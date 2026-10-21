@@ -357,6 +357,33 @@ const finder = new LineFinder(graph);
 
 Landmark tables work the same way: `table.toTransferable()` / `LandmarkTable.fromTransferable()`. A graph built with a custom metric object needs that `metric` again when it is deserialised.
 
+### Prebuilt graph files
+
+Pack a built graph (optionally with its ALT landmarks and source features) into one versioned binary file, serve it from a CDN, IndexedDB or a worker's response, and let clients load it instead of building:
+
+```ts
+// build side (a Node script, CI, or after a first build)
+const graph = buildGraph(roads, { weight });
+const landmarks = prepareLandmarks(graph, { count: 8 });
+const meta = { dataVersion: '2026-10-21T08:00Z', options: 'osm-v3' }; // your own staleness check, returned as is
+writeFileSync('roads.graph.bin', graphToBinary(graph, { landmarks, meta })); // features: true stores the source features too
+
+// client / server
+const bytes = await (await fetch('/roads.graph.bin')).arrayBuffer();
+if (inspectBinaryGraph(bytes).meta?.dataVersion !== expectedVersion) {
+  /* stale file: only the header was read, the graph is not loaded yet */
+}
+const { graph, landmarks } = graphFromBinary(bytes, { features: roads.features }); // features are optional
+const finder = new LineFinder(graph, { landmarks: landmarks ?? undefined });
+```
+
+- On a 135 k-coordinate network: building takes about 80–90 ms and 8 landmarks 35–115 ms; loading the file about 1.5 ms, landmarks included (they are viewed in place). See [docs/BENCHMARK.en.md](docs/BENCHMARK.en.md) §5.8.
+- A loaded graph keeps no JS coordinate array per vertex (`graph.position(v)` makes one on demand; `vertices.positions` is built on first access), so its heap is about a tenth of a built graph's; several workers can share one `SharedArrayBuffer`.
+- `inspectBinaryGraph(bytes)` parses the header only: it returns `meta`, the stats, whether landmarks / features are stored and the full file length, to tell a stale or truncated file before loading it.
+- When you import `LineFinder` and the like but not these functions, bundlers (esbuild, Rollup / Vite) tree-shake all binary-file code away — `pnpm check:size` checks both.
+- The file **saves CPU, not bandwidth**: costs, lengths and the R-tree are derived doubles that barely compress, so with brotli it is 3.5–5.6× the GeoJSON. Use it where building is expensive (phones, landmarks) or the file can be cached locally; when transfer size matters, ship the GeoJSON and build on the client.
+- Costs are baked in: a different weighting or build option needs a new file. The loaded graph views the bytes it was given — leave them unchanged and untransferred while it is in use; input that is not 8-byte aligned (a slice of Node's `Buffer` pool, say) is copied once.
+
 ## Migrating from geojson-path-finder
 
 | geojson-path-finder                                    | geoverse-line-finder                                                               |

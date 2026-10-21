@@ -200,6 +200,25 @@ The 135k-coordinate OSM network (large-network.json, line features), 7 samples:
 - Tolerance mode gains less: every lookup inspects the 3×3 = 9 cells around it, most of which do not exist; a small bitmap now spares the memory accesses for the empty ones, and what is left is mostly the real distance comparisons. What remains in repair mode is mostly `splitIntersections`' own intersection tests — switching them to monotone chains (item A4 of the research) would change the order in which candidates are visited and could swap one of several equal routes for another, so it is not done.
 - With an id on every coordinate, `nodeId` builds about 1.2× slower than coordinates alone (one callback and one `Map` lookup per coordinate) — the inherent cost of explicit topology; ids on end points only cost less.
 
+### 5.8 Prebuilt graph files (unreleased, `--only binary`)
+
+> 2026-10-21, Intel Core Ultra 9 185H, Node 24.21.0, `--expose-gc`, built artefacts. Each sample starts with a GC; a build sample is the mean of 5 consecutive builds, a load sample the mean of 20 consecutive loads; landmark preparation is timed once. `pnpm bench:features --only binary --rounds 7`
+
+135 k-coordinate OSM network (large-network.json, line features), 7 samples:
+
+| network · weighting | build ms         | load file ms  | ratio (medians) | prepare 8 landmarks ms | load file (with landmarks) ms | file MB (gzip / brotli)                   |
+| ------------------- | ---------------- | ------------- | --------------- | ---------------------- | ----------------------------- | ----------------------------------------- |
+| distance (default)  | 76.5 [64.8–95.3] | 1.3 [0.8–1.5] | **57.5×**       | 115.5 [75.7–120.9]     | 1.3 [0.8–1.6]                 | 15.99 (9.13 / 6.47); with landmarks 19.70 |
+| OSM travel time     | 86.1 [79.6–88.7] | 1.5 [1.0–1.6] | **59.3×**       | 39.9 [30.4–47.6]       | 1.3 [1.1–1.5]                 | 10.23 (5.98 / 4.03); with landmarks 11.90 |
+
+For comparison, the GeoJSON input of the same network is 6.78 MB (gzip 1.31 MB, brotli 1.16 MB). A second 7-sample run: builds 80.9 / 90.3 ms, loads 1.2 / 1.3 ms (65.2× / 68.7×); no ranges overlap.
+
+- **What it saves is the build and the landmarks**: building plus preparing landmarks takes about 120–200 ms, loading the file about 1.5 ms; landmark tables are viewed in place, so they add almost nothing to the load. Phone CPUs are several times slower, so the absolute gap grows.
+- **Where the load time went**: the first implementation loaded in about 17 ms — some 13 ms rebuilding the vertex hash index, most of the rest allocating a JS coordinate array per vertex. The index now waits for the first vertex lookup by location (`snap.mode: 'exact'`), and positions are made on demand from the x / y / z typed arrays (`graph.position(v)`; `vertices.positions` is built on first access), leaving views and the JSON header. Queries do not slow down: the same 300 random queries take 201 ms on a built graph and 197–198 ms on a loaded one (7 alternating rounds, ranges overlap), with identical results.
+- **Resident memory**: the heap of a loaded graph went from 8.1 to 0.9 MB at 135 k coordinates and from 128 to 12 MB at 2.17 M (the network tiled 16×), so the file bytes (15 / 244 MB) are what remains; with 4 workers sharing one `SharedArrayBuffer` the process grows by 134 MB instead of 662 MB, each worker's heap 19 MB instead of 134 MB. The assessment is in the PM note `GEOVERSE_LINE_FINDER_NODE_SERVICE_ASSESSMENT.md`.
+- **It does not save bandwidth**: lengths, costs, R-tree boxes and the embedding are full-precision derived doubles; byte shuffling or delta coding saves only about 8 % more under gzip, and with brotli the file is still 3.5–5.6× the GeoJSON. Two savings are in: `positions` store only z values (nothing on a flat network) and byte-identical tables are stored once (both cost directions of `segments` / `chains` share the lengths under the default weight), which took the distance-weighted file from 24.7 MB to 16.0 MB. Rebuilding the R-tree on load would save another 3.9 MB (about 1.8 MB gzip) but cost about 15 ms, ten times the load as it is now, so it is not done.
+- The OSM-weighted graph is smaller because impassable features such as footways stay out of it (52 k vertices vs 103 k). Small regular grids (warehouse aisles, say) do not compress into chains, so their file grows more against the GeoJSON (852 aisles: 774 KB vs 175 KB).
+
 ## Reproducing
 
 - Do not run it alongside tests, builds or another benchmark; mind the power mode on laptops.
